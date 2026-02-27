@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as chrono from "chrono-node";
 
 import { PARQUET_GLOB_URL, WINDOW_SIZE_MS } from "../config";
@@ -23,6 +23,7 @@ export function useTripPlayback() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [speed, setSpeed] = useState<PlaybackSpeed>(10);
   const [decodedTrips, setDecodedTrips] = useState<DecodedTrip[]>([]);
+  const [encodedTrips, setEncodedTrips] = useState<EncodedTrip[]>([]);
   const [cacheVersion, setCacheVersion] = useState(0);
 
   const clientRef = useRef<DuckDBTripClient | null>(null);
@@ -119,7 +120,7 @@ export function useTripPlayback() {
     }
   }, [bounds, currentWindowKey, fetchWindow, status]);
 
-  const encodedTrips = useMemo(() => {
+  useEffect(() => {
     const tripsById = new Map<string, EncodedTrip>();
     const keys = [currentWindowKey - 1, currentWindowKey, currentWindowKey + 1];
     for (const key of keys) {
@@ -131,7 +132,7 @@ export function useTripPlayback() {
         tripsById.set(`${row.trip_id}:${row.start_time_ms}`, row);
       }
     }
-    return Array.from(tripsById.values());
+    setEncodedTrips(Array.from(tripsById.values()));
   }, [cacheVersion, currentWindowKey]);
 
   useEffect(() => {

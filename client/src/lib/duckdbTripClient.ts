@@ -62,6 +62,9 @@ export class DuckDBTripClient {
     if (!this.db) {
       const logger = new duckdb.ConsoleLogger();
       const bundle = await duckdb.selectBundle(BUNDLES);
+      if (!bundle.mainWorker) {
+        throw new Error("DuckDB bundle does not contain a worker script.");
+      }
       const worker = new Worker(bundle.mainWorker);
       this.db = new duckdb.AsyncDuckDB(logger, worker);
       await this.db.instantiate(bundle.mainModule, bundle.pthreadWorker);

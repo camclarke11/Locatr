@@ -70,7 +70,13 @@ function App() {
         initialViewState={LONDON_VIEW_STATE}
         controller
         layers={layers}
-        style={{ position: "absolute", inset: 0 }}
+        style={{
+          position: "absolute",
+          top: "0",
+          right: "0",
+          bottom: "0",
+          left: "0",
+        }}
       >
         <Map reuseMaps mapStyle={MAP_STYLE_URL} />
       </DeckGL>
@@ -88,7 +94,7 @@ function App() {
         speed={speed}
         onSetTime={setPlaybackTime}
         onTogglePlay={togglePlay}
-        onSetSpeed={setSpeed}
+        onSetSpeed={(nextSpeed) => setSpeed(nextSpeed)}
         onNaturalLanguageJump={jumpToNaturalLanguage}
         jumpError={jumpError}
       />

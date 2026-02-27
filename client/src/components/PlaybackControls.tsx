@@ -1,4 +1,4 @@
-import { FormEvent, useState } from "react";
+import { useState, type FormEvent } from "react";
 
 import { formatLondonTime } from "../lib/time";
 import type { PlaybackSpeed } from "../types";
@@ -29,7 +29,7 @@ export function PlaybackControls({
   onSetSpeed,
   onNaturalLanguageJump,
   jumpError,
-}: PlaybackControlsProps): JSX.Element {
+}: PlaybackControlsProps) {
   const [query, setQuery] = useState("");
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>): void => {
