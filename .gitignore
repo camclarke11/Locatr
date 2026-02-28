@@ -4,3 +4,4 @@ __pycache__/
 
 pipeline/data/
 pipeline/output/
+client/public/data/parquet/

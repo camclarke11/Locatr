@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live Tube Map - real-time London Underground Trains</title>
+  
+  <!-- Primary Meta Tags -->
+  <meta name="title" content="Live Tube Map - Real-time London Underground Trains">
+  <meta name="description" content="Watch London Underground trains move in real-time on an interactive 3D map. See live tube trains across all lines including Central, Northern, Victoria, and more.">
+  <meta name="keywords" content="London Underground, Tube Map, Live Trains, Real-time Trains, London Transport, TfL, Underground Map, 3D Tube Map">
+  <meta name="author" content="Ben James">
+  
+  <!-- Preload critical resources -->
+  <link rel="preload" href="lib/maplibre-gl.js" as="script">
+  <link rel="preload" href="lib/maplibre-gl.css" as="style">
+  <link rel="preload" href="render.js" as="script">
+  <link rel="preload" href="2_tube_stations_manually_tweaked.json" as="fetch" crossorigin>
+  <link rel="preload" href="tfl_lines_trimmed_tweaked.json" as="fetch" crossorigin>
+  
+  <!-- Favicons -->
+  <link rel="icon" type="image/x-icon" href="favicon.ico">
+  <link rel="icon" type="image/png" sizes="96x96" href="favicon-96x96.png">
+  <link rel="apple-touch-icon" sizes="192x192" href="web-app-manifest-192x192.png">
+  <link rel="apple-touch-icon" sizes="512x512" href="web-app-manifest-512x512.png">
+   
+  <!-- Load styles first -->
+  <link href="lib/maplibre-gl.css" rel="stylesheet" />
+  <link href="styles.css?v=2.0" rel="stylesheet" />
+  
+  <!-- Load critical scripts without defer -->
+  <script src="render.js"></script>
+  
+  <!-- Load other scripts with defer -->
+  <script src="lib/maplibre-gl.js" defer></script>
+  <script src="lib/dist.min.js" defer></script>
+
+  <!-- Google tag (gtag.js) -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-69K0GSM0LM"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+
+    gtag('config', 'G-69K0GSM0LM');
+  </script>
+</head>
+<body>
+  <div class="view-selector">
+    <a href="index.html" class="active">MAP</a>
+    <a href="board.html">BOARDS</a>
+  </div>
+  <div class="map-container">
+    <div id="map"></div>
+    <div id="tooltip"></div>
+    <div id="instructions">
+      Right click to orbit<br>
+      Zoom for buildings<br>
+      Hover for details
+    </div>
+    <div id="live-icon">
+      <svg viewBox="0 0 100 40" xmlns="http://www.w3.org/2000/svg">
+        <circle class="circle-pulse" cx="20" cy="20" r="10" fill="#ff0000" />
+        <text x="45" y="29" fill="#ff0000" font-size="30">LIVE</text>
+      </svg>
+    </div>
+    <div class="map-attribution">
+      © MapTiler © OpenStreetMap contributors
+    </div>
+  </div>
+  <div class="attribution">
+    By <a href="https://benjames.io" target="_blank" class="data-sources">Ben James
+      <svg class="external-link-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M18 13V19C18 19.5304 17.7893 20.0391 17.4142 20.4142C17.0391 20.7893 16.5304 21 16 21H5C4.46957 21 3.96086 20.7893 3.58579 20.4142C3.21071 20.0391 3 19.5304 3 19V8C3 7.46957 3.21071 6.96086 3.58579 6.58579C3.96086 6.21071 4.46957 6 5 6H11" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M15 3H21V9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M10 14L21 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  </a> • 
+  <span class="desktop-only">
+    <a href="https://benbyfax.substack.com/subscribe" target="_blank" class="data-sources">Subscribe to future projects
+    </a> • 
+  </span>
+    <a href="https://ben-james.notion.site/tube-data?" target="_blank" class="data-sources">
+      Data
+    </a>
+    <span class="desktop-only"> • 
+      With thanks to <a href="https://maptiler.com/" target="_blank" class="data-sources">
+        <img src="maptiler-icon.png" alt="MapTiler" class="maptiler-icon" />
+        Maptiler
+      </a> & <a href="https://londonminute.substack.com/" target="_blank" class="data-sources">The London Minute
+      </a>
+    </span>
+    <span class="mobile-only-map-attribution">
+      <br/>
+        © MapTiler © OpenStreetMap contributors
+    </span>
+  </div>
+
+  <script>
+    // Wait for all deferred scripts to load before initializing
+    window.addEventListener('load', () => {
+      // Start application
+      initialize();
+    });
+    
+    // Center of London
+    const INITIAL_VIEW_STATE = {
+      longitude: -0.118092,
+      latitude: 51.509865,
+      zoom: 14,
+      pitch: 50,
+      bearing: 0
+    };
+    
+    // API key for MapTiler
+    const MAPTILER_API_KEY = '2Ac74fW0rUWql1W29gBz';
+
+    const getSecondsSinceUtcMidnight = () => {
+      const now = new Date();
+      return now.getUTCHours() * 3600 + now.getUTCMinutes() * 60 + now.getUTCSeconds() + now.getUTCMilliseconds() / 1000;
+    }
+    
+    // Function to clean station names by removing "Underground Station" suffix
+    function cleanStationName(name) {
+      if (!name) return name;
+      return name.replace(' Underground Station', '').trim();
+    }
+    
+    // Define line colors globally so they're accessible to all functions
+    const LINE_COLORS = {
+      'bakerloo': [179, 99, 5],        // #B36305
+      'central': [227, 32, 23],        // #E32017
+      'circle': [255, 211, 0],         // #FFD300
+      'district': [0, 120, 42],        // #00782A
+      'hammersmith-city': [243, 169, 187], // #F3A9BB
+      'jubilee': [160, 165, 169],      // #A0A5A9
+      'metropolitan': [155, 0, 86],     // #9B0056
+      'northern': [0, 0, 0],           // #000000
+      'piccadilly': [0, 54, 136],      // #003688
+      'victoria': [0, 152, 212],       // #0098D4
+      'waterloo-city': [149, 205, 186] // #95CDBA
+    };
+    
+    // Global variable to track currently hovered train
+    let hoveredTrain = null;
+    
+    // Global variable for tube stations data
+    let tubeStationsData = null;
+    
+    // Global variable for current train paths
+    let currentTrainPaths = [];
+    
+    // Function to load data in parallel
+    async function loadData() {
+      try {
+        const [stationsResponse, linesResponse] = await Promise.all([
+          fetch('2_tube_stations_manually_tweaked.json'),
+          fetch('tfl_lines_trimmed_tweaked.json')
+        ]);
+        
+        tubeStationsData = await stationsResponse.json();
+        linesData = await linesResponse.json();
+        
+        console.log("Loaded tube station data:", Object.keys(tubeStationsData).length, "stations");
+        console.log("Loaded TfL lines data:", linesData.features.length, "line segments");
+        
+        return true;
+      } catch (error) {
+        console.error("Error loading data:", error);
+        return false;
+      }
+    }
+    
+    // Function to fetch and update train paths
+    async function updateTrainPaths() {
+      try {
+        console.log("Fetching new train actions...");
+        const trainActions = await TrainTrips.fetchTrainActions();
+        if (trainActions) {
+          console.log("Converting actions to paths...");
+          const newPaths = await TrainTrips.convertActionsToPaths(trainActions);
+          
+          // Filter out invalid paths
+          const validPaths = newPaths.filter(path => 
+            path && 
+            Array.isArray(path.path) && 
+            path.path.length >= 2 &&
+            Array.isArray(path.timestamps) &&
+            path.timestamps.length >= 2 &&
+            path.timestamps.every(t => t != null) &&
+            path.path.every(p => Array.isArray(p) && p.length >= 2)
+          );
+          console.log(`filtered out ${newPaths.length - validPaths.length} invalid paths`);
+          
+          console.log(`Updated ${validPaths.length} train paths`);
+          currentTrainPaths = validPaths;
+        }
+      } catch (error) {
+        console.error("Error updating train paths:", error);
+      }
+    }
+    
+    // Function to update the train tooltip
+    function updateTrainTooltip(object, x, y, forceUpdate = false) {
+      const tooltip = document.getElementById('tooltip');
+      
+      // If no object and we're not forcing an update, hide tooltip
+      if (!object && !forceUpdate) {
+        tooltip.style.display = 'none';
+        hoveredTrain = null;
+        return;
+      }
+      
+      // Use the stored hovered train if we're forcing an update
+      const trainObject = object || hoveredTrain;
+      if (!trainObject) return;
+      
+      // Store the currently hovered train
+      hoveredTrain = trainObject;
+      
+      // Format the line name in Title Case with its color
+      const lineName = trainObject.line_name || 'Unknown';
+      const formattedLineName = lineName.split('-').map(word => 
+        word.charAt(0).toUpperCase() + word.slice(1)
+      ).join('-');
+      
+      // Get line color for text
+      const lineNameLower = lineName.toLowerCase();
+      const lineColor = LINE_COLORS[lineNameLower] || [0, 0, 0];
+      const colorHex = `rgb(${lineColor[0]}, ${lineColor[1]}, ${lineColor[2]})`;
+      
+      // Create tooltip content
+      let tooltipContent = `<strong style="color: ${colorHex}">${formattedLineName} Train ${trainObject.train_id}</strong><br>`;
+      
+      // Calculate current position in the journey
+      const currentTime = getSecondsSinceUtcMidnight();
+      
+      // Find current segment of the journey (between two stops)
+      let currentAction = null;
+      let segmentProgress = 0;
+      let currentPointIndex = 0;
+      let isStopped = false;
+      
+      // Find the current action based on time
+      if (trainObject.actions && trainObject.actions.length > 0) {
+        for (const action of trainObject.actions) {
+          if (currentTime >= action.from_timestamp && currentTime <= action.to_timestamp) {
+            currentAction = action;
+            
+            // Check if train is stopped (from and to stations are the same)
+            isStopped = action.from_stop_id === action.to_stop_id;
+            
+            if (!isStopped) {
+              // Calculate progress within this segment
+              const segmentDuration = action.to_timestamp - action.from_timestamp;
+              const segmentElapsed = currentTime - action.from_timestamp;
+              segmentProgress = Math.min(100, Math.max(0, (segmentElapsed / segmentDuration) * 100)).toFixed(1);
+            } else {
+              // For stopped trains, set progress to 100%
+              segmentProgress = 100;
+            }
+            break;
+          }
+        }
+      }
+      
+      // If no current action found, fall back to overall progress
+      if (!currentAction && trainObject.timestamps && trainObject.timestamps.length > 1) {
+        const startTime = trainObject.timestamps[0];
+        const endTime = trainObject.timestamps[trainObject.timestamps.length - 1];
+        const totalDuration = endTime - startTime;
+        const elapsedTime = currentTime - startTime;
+        segmentProgress = Math.min(100, Math.max(0, (elapsedTime / totalDuration) * 100)).toFixed(1);
+      }
+      
+      // Find current position in the path
+      if (trainObject.path && trainObject.path.length > 1 && 
+          trainObject.timestamps && trainObject.timestamps.length > 1) {
+        // Find the current position based on timestamps
+        for (let i = 0; i < trainObject.timestamps.length; i++) {
+          if (trainObject.timestamps[i] > currentTime) {
+            currentPointIndex = Math.max(0, i - 1);
+            break;
+          }
+          // If we've gone through all timestamps, use the last point
+          if (i === trainObject.timestamps.length - 1) {
+            currentPointIndex = i;
+          }
+        }
+      }
+      
+      // Add journey information
+      if (currentAction) {
+        if (isStopped) {
+          // Display "STOPPED at [station]" for stationary trains
+          const stationName = cleanStationName(tubeStationsData[currentAction.from_stop_id]?.name) || currentAction.from_stop_id;
+          tooltipContent += `<strong>STOPPED at ${stationName}</strong><br>`;
+        } else {
+          // Show journey for moving trains
+          tooltipContent += `<strong>From:</strong> ${cleanStationName(tubeStationsData[currentAction.from_stop_id]?.name) || currentAction.from_stop_id}<br>`;
+          tooltipContent += `<strong>To:</strong> ${cleanStationName(tubeStationsData[currentAction.to_stop_id]?.name) || currentAction.to_stop_id}<br>`;
+          tooltipContent += `<strong>Progress:</strong> ${segmentProgress}%<br>`;
+          
+          // Add progress bar
+          tooltipContent += `<div style="width: 100%; height: 10px; background-color: #eee; border-radius: 5px; margin: 5px 0;">
+            <div style="width: ${segmentProgress}%; height: 100%; background-color: ${colorHex}; border-radius: 5px;"></div>
+          </div>`;
+        }
+      } else {
+        // Fallback if no current action found
+        tooltipContent += `<strong>Progress:</strong> ${segmentProgress}%<br>`;
+        
+        // Add progress bar
+        tooltipContent += `<div style="width: 100%; height: 10px; background-color: #eee; border-radius: 5px; margin: 5px 0;">
+          <div style="width: ${segmentProgress}%; height: 100%; background-color: ${colorHex}; border-radius: 5px;"></div>
+        </div>`;
+      }
+      
+      // Add future stops section
+      if (trainObject.actions && trainObject.actions.length > 0) {
+        // Find index of current action
+        let currentActionIndex = -1;
+        for (let i = 0; i < trainObject.actions.length; i++) {
+          const action = trainObject.actions[i];
+          if (currentTime >= action.from_timestamp && currentTime <= action.to_timestamp) {
+            currentActionIndex = i;
+            break;
+          }
+        }
+        
+        // If found current action and there are more actions after it
+        if (currentActionIndex >= 0 && currentActionIndex < trainObject.actions.length - 1) {
+          tooltipContent += `<div style="margin-top: 8px;"><strong>Future Stops:</strong></div>`;
+          tooltipContent += `<ul style="margin-top: 2px; padding-left: 15px;">`;
+          
+          // Track unique stations to avoid duplicates
+          const stationsShown = new Set();
+          const futureStops = [];
+          
+          // Add current destination if moving (not at the final step)
+          if (!isStopped && currentAction) {
+            const stationId = currentAction.to_stop_id;
+            const stationName = cleanStationName(tubeStationsData[stationId]?.name) || stationId;
+            const arrivalTime = new Date(currentAction.to_timestamp * 1000).toISOString().substr(11, 8);
+            
+            if (!stationsShown.has(stationId)) {
+              stationsShown.add(stationId);
+              futureStops.push({
+                time: currentAction.to_timestamp,
+                timeFormatted: arrivalTime,
+                name: stationName,
+                id: stationId
+              });
+            }
+          }
+          
+          // Add future stops (starting from next action or the current one if stopped)
+          const startIndex = isStopped ? currentActionIndex : currentActionIndex + 1;
+          
+          for (let i = startIndex; i < trainObject.actions.length; i++) {
+            const action = trainObject.actions[i];
+            const stationId = action.to_stop_id;
+            const stationName = cleanStationName(tubeStationsData[stationId]?.name) || stationId;
+            const arrivalTime = new Date(action.to_timestamp * 1000).toISOString().substr(11, 8);
+            
+            // Only add if we haven't seen this station before
+            if (!stationsShown.has(stationId)) {
+              stationsShown.add(stationId);
+              futureStops.push({
+                time: action.to_timestamp,
+                timeFormatted: arrivalTime,
+                name: stationName,
+                id: stationId
+              });
+            }
+          }
+          
+          // Limit number of stops to display
+          const maxStopsToShow = 5;
+          const stopsToShow = futureStops.slice(0, maxStopsToShow);
+          
+          // Display stops
+          for (const stop of stopsToShow) {
+            tooltipContent += `<li>${stop.timeFormatted} - ${stop.name}</li>`;
+          }
+          
+          // Show ellipsis if there are more stops
+          if (futureStops.length > maxStopsToShow) {
+            tooltipContent += `<li>...</li>`;
+          }
+          
+          tooltipContent += `</ul>`;
+        }
+      }
+      
+      // Display the tooltip
+      tooltip.style.display = 'block';
+      // Only update position if not forcing update (i.e., mouse has moved)
+      if (x && y && !forceUpdate) {
+        tooltip.style.left = x + 'px';
+        tooltip.style.top = y + 'px';
+      }
+      tooltip.innerHTML = tooltipContent;
+    }
+    
+    // Initialize app
+    async function initialize() {
+      try {
+        // Start loading data in parallel with map initialization
+        const dataPromise = loadData();
+        
+        // Clone the map style and update URLs with API key
+        const mapStyle = JSON.parse(JSON.stringify(MAP_STYLE));
+        mapStyle.glyphs = `https://api.maptiler.com/fonts/{fontstack}/{range}.pbf?key=${MAPTILER_API_KEY}`;
+        mapStyle.sources['simple-tiles'].tiles = [`https://api.maptiler.com/tiles/v3/{z}/{x}/{y}.pbf?key=${MAPTILER_API_KEY}`];
+        
+        // Create a MapLibre map with the custom style
+        const map = new maplibregl.Map({
+          container: 'map',
+          style: mapStyle,
+          center: [INITIAL_VIEW_STATE.longitude, INITIAL_VIEW_STATE.latitude],
+          zoom: INITIAL_VIEW_STATE.zoom,
+          pitch: INITIAL_VIEW_STATE.pitch,
+          bearing: INITIAL_VIEW_STATE.bearing,
+          antialias: true,  // Enable antialiasing for smoother rendering
+          dragRotate: true,  // Enable rotation with drag
+          maxPitch: 85,  // Allow more extreme pitch angles (default is 60)
+          maxZoom: 20    // Allow closer zoom
+        });
+        
+        // Enable 3D navigation controls
+        map.addControl(new maplibregl.NavigationControl());
+        
+        // Wait for both map and data to load
+        await Promise.all([
+          new Promise(resolve => map.on('load', resolve)),
+          dataPromise
+        ]);
+        
+        console.log("Map and data loaded successfully");
+
+        // Create lighting effect with camera light
+        const lightingEffect = new deck.LightingEffect({
+          cameraLight: true,
+          ambientLight: {
+            color: [255, 255, 255],
+            intensity: 0.6
+          },
+          directionalLight: {
+            color: [255, 255, 255],
+            intensity: 0.8,
+            direction: [0, -1, -1]
+          }
+        });
+        
+        // Transform station data for visualization
+        const points = [];
+        
+        for (const [id, station] of Object.entries(tubeStationsData)) {
+          let avgDepth = 0;
+          let depthCount = 0;
+          
+          // Extract lines from the depths object
+          const stationLines = station.depths ? 
+            Object.keys(station.depths).filter(line => line !== 'ground_level') : 
+            [];
+          
+          if (station.depths) {
+            for (const [line, depth] of Object.entries(station.depths)) {
+              if (line !== 'ground_level') {
+                avgDepth += depth;
+                depthCount++;
+              }
+            }
+            
+            if (depthCount > 0) {
+              avgDepth = avgDepth / depthCount;
+            } else if (station.depths.ground_level) {
+              avgDepth = station.depths.ground_level;
+            }
+          }
+          
+          points.push({
+            position: [station.longitude, station.latitude, avgDepth*5],
+            name: station.name,
+            depth: avgDepth,
+            lines: stationLines
+          });
+        }
+
+        // Initial fetch of train actions
+        await updateTrainPaths();
+
+        const tripsLayerConfig = {
+          id: 'trips',
+          data: currentTrainPaths,
+          getPath: d => d.path,
+          getTimestamps: d => d.timestamps,
+          getColor: d => {
+            const lineName = (d.line_name || '').toLowerCase();
+            const baseColor = LINE_COLORS[lineName] || [200, 200, 200];
+            // Make the train color darker by reducing each RGB component by 40%
+            return [
+              Math.floor(baseColor[0] * 0.7),
+              Math.floor(baseColor[1] * 0.7),
+              Math.floor(baseColor[2] * 0.7)
+            ];
+          },
+          opacity: 1,
+          widthMinPixels: 7,
+          billboard: false,
+          jointRounded: true,
+          capRounded: true,
+          trailLength: 20,
+          parameters: {
+            depthTest: true,
+            depthWrite: true
+          },
+          updateTriggers: {
+            getPath: currentTrainPaths,
+            getTimestamps: currentTrainPaths
+          },
+          pickable: true,
+          onHover: ({object, x, y}) => {
+            updateTrainTooltip(object, x, y);
+          }
+        };
+
+        const layers = [
+          // LAYER 1: TUBE LINES
+          new deck.GeoJsonLayer({
+            id: 'tube-lines',
+            data: linesData,
+            pickable: true,
+            stroked: false,
+            filled: false,
+            lineWidthScale: 1,
+            lineWidthMinPixels: 12,
+            extruded: true,
+            getLineColor: d => {
+              const lineName = d.properties.lines[0]?.name?.toLowerCase();
+              if(lineName in LINE_COLORS) {
+                return [...(LINE_COLORS[lineName] || [200, 200, 200]), 50]; // Add 180 / 255 transparency
+              } else {
+                return [0, 0, 0, 0]; // Default color if line name not found
+              }
+            },
+            getLineWidth: 1,
+            parameters: {
+              depthTest: false,
+              depthWrite: false
+            },
+            getElevation: 0,
+            onHover: ({object, x, y}) => {
+              const tooltip = document.getElementById('tooltip');
+              if (object && object.properties.lines && object.properties.lines.length > 0) {
+                const lineName = object.properties.lines[0].name;
+                const formattedLineName = lineName.split('-').map(word => 
+                  word.charAt(0).toUpperCase() + word.slice(1)
+                ).join('-');
+                
+                const lineNameLower = lineName.toLowerCase();
+                const lineColor = LINE_COLORS[lineNameLower] || [0, 0, 0];
+                const colorHex = `rgb(${lineColor[0]}, ${lineColor[1]}, ${lineColor[2]})`;
+                
+                tooltip.style.display = 'block';
+                tooltip.style.left = x + 'px';
+                tooltip.style.top = y + 'px';
+                tooltip.innerHTML = `<strong style="color: ${colorHex}">${formattedLineName} Line</strong>`;
+              }
+              else {
+                tooltip.style.display = 'none';
+              }
+            }
+          }),
+
+          // LAYER 2: TRAIN TRIPS
+          new deck.TripsLayer({
+            ...tripsLayerConfig,
+            currentTime: getSecondsSinceUtcMidnight()
+          }),
+
+          // LAYER 3: STATIONS
+          new deck.ScatterplotLayer({
+            id: 'stations',
+            data: points,
+            getPosition: d => [d.position[0], d.position[1], 0],
+            getFillColor: d => {
+              if (d.lines.length === 1) {
+                const lineColor = LINE_COLORS[d.lines[0].toLowerCase()];
+                return lineColor ? [...lineColor, 153] : [255, 255, 255, 153];
+              }
+              return [255, 255, 255, 153];
+            },
+            getLineColor: d => d.lines.length > 1 ? [0, 0, 0, 153] : [0, 0, 0, 0],
+            getLineWidth: d => d.lines.length > 1 ? 4 : 0,
+            lineWidthUnits: 'meters',
+            stroked: true,
+            filled: true,
+            radiusUnits: 'meters',
+            getRadius: 50,
+            radiusMinPixels: 1,
+            radiusMaxPixels: 20,
+            pickable: true,
+            onHover: ({object, x, y}) => {
+              const tooltip = document.getElementById('tooltip');
+              if (object) {
+                const formattedLines = object.lines.map(line => {
+                  const formattedName = line.split('-').map(word => 
+                    word.charAt(0).toUpperCase() + word.slice(1)
+                  ).join('-');
+                  
+                  const lineColor = LINE_COLORS[line.toLowerCase()] || [0, 0, 0];
+                  const colorHex = `rgb(${lineColor[0]}, ${lineColor[1]}, ${lineColor[2]})`;
+                  
+                  return `<span style="color: ${colorHex}">${formattedName}</span>`;
+                }).join(', ');
+                
+                const coordinates = `<div style="margin-top: 5px; font-size: 12px;">
+                  <strong>Coordinates:</strong><br>
+                  Latitude: ${object.position[1].toFixed(6)}<br>
+                  Longitude: ${object.position[0].toFixed(6)}
+                  ${object.id ? `<br>Station ID: ${object.id}` : ''}
+                </div>`;
+                
+                tooltip.style.display = 'block';
+                tooltip.style.left = x + 'px';
+                tooltip.style.top = y + 'px';
+                tooltip.innerHTML = `<strong>${object.name}</strong><br>${formattedLines}${coordinates}`;
+              } else {
+                tooltip.style.display = 'none';
+              }
+            }
+          })
+        ];
+        
+        // Add a global mouse move event listener to hide tooltip when not hovering over any layer
+        document.getElementById('map').addEventListener('mousemove', (e) => {
+          const pickInfo = window.deckOverlay.pickObject({
+            x: e.clientX,
+            y: e.clientY,
+            radius: 1
+          });
+          
+          if (!pickInfo) {
+            document.getElementById('tooltip').style.display = 'none';
+          }
+        });
+        
+        console.log("Created initial layers:", layers.map(l => l.id));
+
+        // Create a deck.gl overlay
+        window.deckOverlay = new deck.MapboxOverlay({
+          layers: layers,
+          effects: [lightingEffect]
+        });
+        
+        // Add the overlay to the map
+        map.addControl(deckOverlay);
+
+        // Initialize animation
+        const animate = () => {
+          // Create new layers array with updated trip layer
+          const newLayers = [
+              layers[0], // Keep the static tube lines layer
+              new deck.TripsLayer({
+                  ...tripsLayerConfig,
+                  data: currentTrainPaths,
+                  currentTime: getSecondsSinceUtcMidnight()
+              }),
+              layers[2] // Keep the stations layer
+          ];
+
+          // Update deck.gl overlay
+          window.deckOverlay.setProps({ 
+            layers: newLayers,
+            effects: [lightingEffect]
+          });
+
+          // Update tooltip for hovered train if one exists
+          if (hoveredTrain) {
+            updateTrainTooltip(null, null, null, true);
+          }
+
+          requestAnimationFrame(animate);
+        };
+
+        // Start the animation
+        animate();
+
+        // Set up periodic updates of train paths
+          setInterval(updateTrainPaths, 60000); // Update every minute
+      } catch (error) {
+        console.error("Error initializing application:", error);
+      }
+    }
+  </script>
+</body>
+</html> 

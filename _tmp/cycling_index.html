@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<!--
+TfL S3 bucket browser
+Version 2.0.3 (2025-07-14)
+Author: LB
+-->
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <script>
+        const BUCKET_NAME = window.location.hostname;
+        const S3_HOSTNAME = "s3-eu-west-1.amazonaws.com";
+
+        window.addEventListener("load", () => {
+            document.title = BUCKET_NAME;
+            document.getElementById("h1-title").innerText = BUCKET_NAME;
+            window.addEventListener("hashchange", () => loadFolder(getPrefixFromHash()));
+            loadFolder(getPrefixFromHash());
+        });
+
+        function getPrefixFromHash() {
+            return window.location.hash.startsWith("#!") ? decodeURIComponent(window.location.hash.slice(2)) : "";
+        }
+
+        async function loadFolder(prefix = "") {
+            const folderContents = document.getElementById("folderContents");
+            folderContents.innerHTML = "<tr><td>Loading&hellip;</td></tr>";
+
+            let allContents = [];
+            let allCommonPrefixes = [];
+            let continuationToken = null;
+
+            // Fetch paginated results
+            async function fetchPage(token = null) {
+                let url = `https://${S3_HOSTNAME}/${BUCKET_NAME}/?list-type=2&delimiter=/&prefix=${encodeURIComponent(prefix)}`;
+                if (token) {
+                    url += `&continuation-token=${encodeURIComponent(token)}`;
+                }
+
+                const response = await fetch(url);
+                const xml = await response.text();
+                const doc = new DOMParser().parseFromString(xml, "text/xml");
+
+                // Collect files
+                allContents.push(...doc.querySelectorAll("Contents"));
+
+                // Collect subfolders
+                allCommonPrefixes.push(...doc.querySelectorAll("CommonPrefixes"));
+
+                // If the response is truncated, recursively fetch the next page
+                if (doc.querySelector("IsTruncated")?.textContent === "true") {
+                    await fetchPage(doc.querySelector("NextContinuationToken").textContent);
+                }
+            }
+
+            // Fetch all pages
+            await fetchPage();
+
+            // Clear the file list
+            folderContents.replaceChildren();
+
+            // Add "Parent folder" link if not in root directory
+            if (prefix !== "") {
+                const parentPrefix = prefix.slice(0, prefix.lastIndexOf("/", prefix.length - 2) + 1);
+                folderContents.insertAdjacentHTML("beforeend", `
+                    <tr>
+                        <td>‚?©Ô∏è <a href="#!${encodeURIComponent(parentPrefix)}">Parent folder</a></td>
+                        <td></td><td></td>
+                    </tr>
+                `);
+            }
+
+            // Process subfolders
+            allCommonPrefixes.forEach(commonPrefix => {
+                const filePrefix = commonPrefix.querySelector("Prefix").textContent;
+                folderContents.insertAdjacentHTML("beforeend", `
+                    <tr>
+                        <td>??? <a href="#!${encodeURIComponent(filePrefix)}">${encodeHtml(filePrefix.slice(prefix.length, -1))}</a></td>
+                        <td></td>
+                        <td></td>
+                        <td>Folder</td>
+                    </tr>
+                `);
+            });
+
+            // Process files
+            allContents.forEach(contentsElement => {
+                const key = contentsElement.querySelector("Key").textContent;
+                // Sometimes the folder we're in can appear as a file, so let's ignore that.
+                // We don't want to display this bucket browser either.
+                if ([prefix, "index.html"].includes(key)) {
+                    return;
+                }
+
+                const filename = key.slice(prefix.length);
+                const urlEncodedKey = key.split("/").map(encodeURIComponent).join("/");
+                const lastModified = new Date(contentsElement.querySelector("LastModified").textContent).toLocaleString();
+                const size = formatSize(parseInt(contentsElement.querySelector("Size").textContent));
+                const type = filename.includes(".") ? `${filename.split(".").pop().toUpperCase()} file` : "File";
+                folderContents.insertAdjacentHTML("beforeend", `
+                    <tr>
+                        <td>??? <a href="${window.location.protocol === "http:" ? "http:" : "https:"}//${BUCKET_NAME}/${urlEncodedKey}">${encodeHtml(filename)}</a></td>
+                        <td>${lastModified}</td>
+                        <td>${size}</td>
+                        <td>${encodeHtml(type)}</td>
+                    </tr>
+                `);
+            });
+        }
+
+        function formatSize(size) {
+            if (size >= 1024 ** 3) {
+                return `${(size / 1024 ** 3).toFixed(2)} GiB`;
+            }
+            if (size >= 1024 ** 2) {
+                return `${(size / 1024 ** 2).toFixed(2)} MiB`;
+            }
+            if (size >= 1024 ** 1) {
+                return `${(size / 1024 ** 1).toFixed(2)} KiB`;
+            }
+            return `${size} B`;
+        }
+
+        function encodeHtml(str) {
+            const div = document.createElement("div");
+            div.textContent = str;
+            return div.innerHTML;
+        }
+    </script>
+    <title>Loading&hellip;</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 0;
+        }
+
+        header {
+            border-bottom: 3px solid #03071C;
+            background-color: #2d3039;
+        }
+
+        div#roundel {
+            background-color: #0019A8;
+            width: 50px;
+            padding: 10px;
+        }
+
+        main {
+            margin: 0 1rem;
+        }
+
+        h1 {
+            padding-bottom: 8px;
+            border-bottom: 1px solid #637282;
+        }
+
+        table {
+            width: 100%;
+            margin-bottom: 1rem;
+        }
+
+        thead {
+            background: #fff;
+            position: sticky;
+            top: 0;
+        }
+
+        th {
+            text-align: left;
+        }
+
+        tr:nth-child(even) {
+            background: #F2F4F5;
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <div id="roundel">
+            <img src="data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4NCjxzdmcgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB3aWR0aD0iNjQwIiBoZWlnaHQ9IjUyMCI+DQogPHRpdGxlPlRmTCB3aGl0ZSByb3VuZGVsPC90aXRsZT4NCiA8ZyBmaWxsPSJub25lIj4NCiAgPGNpcmNsZSBzdHJva2U9IndoaXRlIiBjeD0iMzIwIiBjeT0iMjYwIiByPSIyMTUiIHN0cm9rZS13aWR0aD0iOTAiLz4NCiAgPHBhdGggc3Ryb2tlPSJ3aGl0ZSIgZD0iTSAwLDI2MCBIIDY0MCIgc3Ryb2tlLXdpZHRoPSIxMDAiLz4NCiA8L2c+DQo8L3N2Zz4NCg=="
+                height="40" alt="Transport for London">
+        </div>
+    </header>
+    <main>
+        <h1 id="h1-title">Loading&hellip;</h1>
+        <noscript>
+            <p>This page requires JavaScript to function. Please enable JavaScript or use a different web browser.</p>
+        </noscript>
+        <p>The public TfL data (or 'open data') released here is for open data users to use in their own software and
+            services. We encourage software developers to use this data to present customer travel information in
+            innovative ways - providing they adhere to the transport data terms and conditions <a
+                href="https://tfl.gov.uk/corporate/terms-and-conditions/transport-data-service">https://tfl.gov.uk/corporate/terms-and-conditions/transport-data-service</a>
+        </p>
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Date modified</th>
+                    <th>Size</th>
+                    <th>Type</th>
+                </tr>
+            </thead>
+            <tbody id="folderContents"></tbody>
+        </table>
+    </main>
+</body>
+
+</html>

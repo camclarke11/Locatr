@@ -15,6 +15,9 @@ This pipeline builds a **DuckDB-friendly Parquet lake** for historical Santander
    - `start_time`
    - `end_time`
    - `route_geometry`
+   - `route_source`
+   - `route_distance_m`
+   - `route_duration_s`
 
 ## Install
 
@@ -36,9 +39,33 @@ python pipeline/london_bike_pipeline.py \
 ### Useful flags
 
 - `--max-trips 10000` for quick smoke tests.
+- `--max-trips-strategy uniform` (default) to avoid early-day bias when capping trips.
+- `--max-trips-strategy earliest` to preserve old first-N behavior.
 - `--max-new-routes 5000` to cap OSRM calls in one run.
 - `--osrm-qps 5` to be gentler with shared/public OSRM instances.
 - `--osrm-url http://localhost:5000` to use your own OSRM backend.
+
+## Backfill a month range
+
+Use the helper runner for resume-friendly backfills:
+
+```bash
+python pipeline/backfill_range.py \
+  --start-month 2024-05 \
+  --end-month latest \
+  --resume
+```
+
+Common fast-demo variant:
+
+```bash
+python pipeline/backfill_range.py \
+  --start-month 2024-05 \
+  --end-month latest \
+  --resume \
+  --max-trips 10000 \
+  --max-new-routes 5000
+```
 
 ## Output layout
 
@@ -53,3 +80,4 @@ pipeline/output/
 ```
 
 `manifest.json` includes the trip count and date bounds for the run.
+It also includes `parquet_files` for all day files currently present in `output-dir`, so wildcard client loads stay consistent across incremental runs.

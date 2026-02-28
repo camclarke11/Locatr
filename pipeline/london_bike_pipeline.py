@@ -17,12 +17,14 @@ import logging
 import re
 import threading
 import time
+import warnings
 import zipfile
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlparse, urlsplit, urlunsplit
 
 import pandas as pd
 import polyline
@@ -69,11 +71,23 @@ COLUMN_ALIASES = {
         "start station",
         "startstation",
     ],
+    "start_station_number": [
+        "start station number",
+        "startstationnumber",
+        "start station id",
+        "startstationid",
+    ],
     "end_station": [
         "end station name",
         "endstationname",
         "end station",
         "endstation",
+    ],
+    "end_station_number": [
+        "end station number",
+        "endstationnumber",
+        "end station id",
+        "endstationid",
     ],
     "start_lat": [
         "start station latitude",
@@ -158,6 +172,62 @@ def parse_month(month_str: str) -> tuple[datetime, datetime]:
     return month_start, month_end
 
 
+def cap_trips(
+    trips: pd.DataFrame, max_trips: int, strategy: str, seed: int
+) -> pd.DataFrame:
+    if max_trips <= 0:
+        raise ValueError("--max-trips must be greater than 0")
+    if len(trips) <= max_trips:
+        return trips
+
+    if strategy == "earliest":
+        capped = trips.head(max_trips).copy()
+    else:
+        capped = trips.sample(n=max_trips, random_state=seed).sort_values("start_time").copy()
+
+    day_count = capped["start_time"].dt.date.nunique()
+    LOGGER.warning(
+        "Trimmed dataset to %d trips via --max-trips using '%s' strategy (%d unique days retained).",
+        len(capped),
+        strategy,
+        day_count,
+    )
+    return capped
+
+
+def list_dataset_parquet_files(parquet_dir: Path) -> list[Path]:
+    return sorted(
+        [path for path in parquet_dir.glob("*.parquet") if re.match(r"\d{4}-\d{2}-\d{2}\.parquet$", path.name)]
+    )
+
+
+def write_dataset_manifest(
+    parquet_dir: Path,
+    month: str,
+    run_trip_count: int,
+    run_start_time: datetime,
+    run_end_time: datetime,
+    route_cache_size: int,
+) -> Path:
+    dataset_files = list_dataset_parquet_files(parquet_dir)
+    metadata = {
+        "month": month,
+        "trip_count": int(run_trip_count),
+        "date_range_utc": {
+            "min_start_time": run_start_time.isoformat(),
+            "max_end_time": run_end_time.isoformat(),
+        },
+        "parquet_files": [path.name for path in dataset_files],
+        "run_parquet_file_count": len([path for path in dataset_files if path.name.startswith(f"{month}-")]),
+        "dataset_parquet_file_count": len(dataset_files),
+        "routes_cached": int(route_cache_size),
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    metadata_path = parquet_dir / "manifest.json"
+    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    return metadata_path
+
+
 def build_http_session() -> requests.Session:
     retry = Retry(
         total=4,
@@ -204,17 +274,86 @@ def overlaps(
 def discover_month_urls(
     session: requests.Session, base_url: str, month_start: datetime, month_end: datetime
 ) -> list[str]:
+    def parse_s3_listing(listing_url: str) -> tuple[str, set[str]]:
+        """Read all S3 listing pages and return bucket host + file URLs."""
+
+        def build_page_url(next_token: str | None) -> str:
+            split = urlsplit(listing_url)
+            query = dict(parse_qsl(split.query, keep_blank_values=True))
+            if next_token:
+                query["continuation-token"] = next_token
+            else:
+                query.pop("continuation-token", None)
+            return urlunsplit(
+                (split.scheme, split.netloc, split.path, urlencode(query), split.fragment)
+            )
+
+        candidates: set[str] = set()
+        bucket_name = ""
+        next_token: str | None = None
+        while True:
+            response = session.get(build_page_url(next_token), timeout=45)
+            response.raise_for_status()
+            root = ET.fromstring(response.text)
+            ns = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
+
+            bucket_name = (
+                root.findtext("s3:Name", default="", namespaces=ns) or bucket_name
+            ).strip()
+            for key in root.findall("s3:Contents/s3:Key", ns):
+                raw_key = (key.text or "").strip()
+                lower = raw_key.lower()
+                if lower.endswith(".csv") or lower.endswith(".zip"):
+                    candidates.add(f"https://{bucket_name}/{quote(raw_key, safe='/')}")
+
+            is_truncated = (
+                root.findtext("s3:IsTruncated", default="false", namespaces=ns).lower()
+                == "true"
+            )
+            if not is_truncated:
+                break
+            next_token = root.findtext(
+                "s3:NextContinuationToken", default="", namespaces=ns
+            ).strip()
+            if not next_token:
+                break
+
+        if not bucket_name:
+            raise RuntimeError("Unable to parse S3 listing bucket name from --tfl-base-url.")
+        return bucket_name, candidates
+
     LOGGER.info("Discovering TfL files from %s", base_url)
     response = session.get(base_url, timeout=45)
+    if (
+        response.status_code == 404
+        and base_url.rstrip("/") == "https://cycling.data.tfl.gov.uk/usage-stats"
+    ):
+        fallback_url = (
+            "https://s3-eu-west-1.amazonaws.com/"
+            "cycling.data.tfl.gov.uk/?list-type=2&prefix=usage-stats/"
+        )
+        LOGGER.warning(
+            "TfL usage-stats path returned 404; falling back to S3 listing endpoint: %s",
+            fallback_url,
+        )
+        return discover_month_urls(
+            session=session,
+            base_url=fallback_url,
+            month_start=month_start,
+            month_end=month_end,
+        )
     response.raise_for_status()
 
-    hrefs = re.findall(r"""href=["']([^"']+)["']""", response.text, flags=re.IGNORECASE)
     all_candidates: set[str] = set()
-    for href in hrefs:
-        lower = href.lower()
-        if not lower.endswith(".csv") and not lower.endswith(".zip"):
-            continue
-        all_candidates.add(urljoin(base_url, href))
+    if "<ListBucketResult" in response.text:
+        _, all_candidates = parse_s3_listing(base_url)
+    else:
+        hrefs = re.findall(r"""href=["']([^"']+)["']""", response.text, flags=re.IGNORECASE)
+        for href in hrefs:
+            lower = href.lower()
+            if not lower.endswith(".csv") and not lower.endswith(".zip"):
+                continue
+            all_candidates.add(urljoin(base_url, href))
 
     month_tokens = {
         month_start.strftime("%Y%m"),
@@ -312,6 +451,41 @@ def find_column(columns: Iterable[str], aliases: Sequence[str], required: bool) 
     return None
 
 
+def parse_datetime_pair(
+    start_values: pd.Series, end_values: pd.Series
+) -> tuple[pd.Series, pd.Series, str]:
+    """Parse start/end datetimes using the strategy that preserves sane durations."""
+
+    def parse(values: pd.Series, *, dayfirst: bool) -> pd.Series:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Parsing dates in %Y-%m-%d %H:%M format when dayfirst=True was specified.*",
+                category=UserWarning,
+            )
+            return pd.to_datetime(values, errors="coerce", dayfirst=dayfirst, utc=True)
+
+    start_dayfirst_false = parse(start_values, dayfirst=False)
+    end_dayfirst_false = parse(end_values, dayfirst=False)
+    score_dayfirst_false = (
+        start_dayfirst_false.notna()
+        & end_dayfirst_false.notna()
+        & (end_dayfirst_false >= start_dayfirst_false)
+    ).sum()
+
+    start_dayfirst_true = parse(start_values, dayfirst=True)
+    end_dayfirst_true = parse(end_values, dayfirst=True)
+    score_dayfirst_true = (
+        start_dayfirst_true.notna()
+        & end_dayfirst_true.notna()
+        & (end_dayfirst_true >= start_dayfirst_true)
+    ).sum()
+
+    if score_dayfirst_true > score_dayfirst_false:
+        return start_dayfirst_true, end_dayfirst_true, "dayfirst=True"
+    return start_dayfirst_false, end_dayfirst_false, "dayfirst=False"
+
+
 def normalize_trip_frame(raw: pd.DataFrame, source_name: str) -> pd.DataFrame:
     columns = list(raw.columns)
     resolved = {
@@ -319,11 +493,17 @@ def normalize_trip_frame(raw: pd.DataFrame, source_name: str) -> pd.DataFrame:
         "start_time": find_column(columns, COLUMN_ALIASES["start_time"], required=True),
         "end_time": find_column(columns, COLUMN_ALIASES["end_time"], required=True),
         "start_station": find_column(columns, COLUMN_ALIASES["start_station"], required=True),
+        "start_station_number": find_column(
+            columns, COLUMN_ALIASES["start_station_number"], required=False
+        ),
         "end_station": find_column(columns, COLUMN_ALIASES["end_station"], required=True),
-        "start_lat": find_column(columns, COLUMN_ALIASES["start_lat"], required=True),
-        "start_lon": find_column(columns, COLUMN_ALIASES["start_lon"], required=True),
-        "end_lat": find_column(columns, COLUMN_ALIASES["end_lat"], required=True),
-        "end_lon": find_column(columns, COLUMN_ALIASES["end_lon"], required=True),
+        "end_station_number": find_column(
+            columns, COLUMN_ALIASES["end_station_number"], required=False
+        ),
+        "start_lat": find_column(columns, COLUMN_ALIASES["start_lat"], required=False),
+        "start_lon": find_column(columns, COLUMN_ALIASES["start_lon"], required=False),
+        "end_lat": find_column(columns, COLUMN_ALIASES["end_lat"], required=False),
+        "end_lon": find_column(columns, COLUMN_ALIASES["end_lon"], required=False),
     }
 
     frame = pd.DataFrame()
@@ -332,31 +512,46 @@ def normalize_trip_frame(raw: pd.DataFrame, source_name: str) -> pd.DataFrame:
     else:
         frame["trip_id"] = pd.Series(index=raw.index, dtype="string")
 
-    frame["start_time"] = pd.to_datetime(
-        raw[resolved["start_time"]], errors="coerce", dayfirst=True, utc=True
+    frame["start_time"], frame["end_time"], datetime_strategy = parse_datetime_pair(
+        raw[resolved["start_time"]],
+        raw[resolved["end_time"]],
     )
-    frame["end_time"] = pd.to_datetime(
-        raw[resolved["end_time"]], errors="coerce", dayfirst=True, utc=True
-    )
+    LOGGER.debug("Datetime parse strategy for %s: %s", source_name, datetime_strategy)
 
     frame["start_station"] = raw[resolved["start_station"]].map(normalize_station_name)
     frame["end_station"] = raw[resolved["end_station"]].map(normalize_station_name)
-    frame["start_lat"] = pd.to_numeric(raw[resolved["start_lat"]], errors="coerce")
-    frame["start_lon"] = pd.to_numeric(raw[resolved["start_lon"]], errors="coerce")
-    frame["end_lat"] = pd.to_numeric(raw[resolved["end_lat"]], errors="coerce")
-    frame["end_lon"] = pd.to_numeric(raw[resolved["end_lon"]], errors="coerce")
+    if resolved["start_station_number"] is not None:
+        frame["start_station_number"] = pd.to_numeric(
+            raw[resolved["start_station_number"]], errors="coerce"
+        ).astype("Int64")
+    else:
+        frame["start_station_number"] = pd.Series(index=raw.index, dtype="Int64")
+    if resolved["end_station_number"] is not None:
+        frame["end_station_number"] = pd.to_numeric(
+            raw[resolved["end_station_number"]], errors="coerce"
+        ).astype("Int64")
+    else:
+        frame["end_station_number"] = pd.Series(index=raw.index, dtype="Int64")
+
+    if resolved["start_lat"] is not None:
+        frame["start_lat"] = pd.to_numeric(raw[resolved["start_lat"]], errors="coerce")
+    else:
+        frame["start_lat"] = pd.Series(index=raw.index, dtype="float64")
+    if resolved["start_lon"] is not None:
+        frame["start_lon"] = pd.to_numeric(raw[resolved["start_lon"]], errors="coerce")
+    else:
+        frame["start_lon"] = pd.Series(index=raw.index, dtype="float64")
+    if resolved["end_lat"] is not None:
+        frame["end_lat"] = pd.to_numeric(raw[resolved["end_lat"]], errors="coerce")
+    else:
+        frame["end_lat"] = pd.Series(index=raw.index, dtype="float64")
+    if resolved["end_lon"] is not None:
+        frame["end_lon"] = pd.to_numeric(raw[resolved["end_lon"]], errors="coerce")
+    else:
+        frame["end_lon"] = pd.Series(index=raw.index, dtype="float64")
     frame["source_file"] = source_name
 
-    required = [
-        "start_time",
-        "end_time",
-        "start_station",
-        "end_station",
-        "start_lat",
-        "start_lon",
-        "end_lat",
-        "end_lon",
-    ]
+    required = ["start_time", "end_time", "start_station", "end_station"]
     frame = frame.dropna(subset=required).copy()
     frame = frame[frame["end_time"] >= frame["start_time"]].copy()
 
@@ -377,6 +572,69 @@ def normalize_trip_frame(raw: pd.DataFrame, source_name: str) -> pd.DataFrame:
         ).astype("string")
 
     return frame
+
+
+def load_bikepoint_station_reference(
+    session: requests.Session, timeout: int
+) -> pd.DataFrame:
+    """Load current station coordinates from TfL BikePoint API."""
+    response = session.get("https://api.tfl.gov.uk/BikePoint", timeout=timeout)
+    response.raise_for_status()
+    points = response.json()
+
+    records: list[dict[str, object]] = []
+    for item in points:
+        if not isinstance(item, dict):
+            continue
+        station_id = str(item.get("id", ""))
+        match = re.search(r"(\d+)$", station_id)
+        station_number = int(match.group(1)) if match else None
+        records.append(
+            {
+                "station_number": station_number,
+                "station_name": normalize_station_name(item.get("commonName", "")),
+                "lat": pd.to_numeric(item.get("lat"), errors="coerce"),
+                "lon": pd.to_numeric(item.get("lon"), errors="coerce"),
+            }
+        )
+
+    reference = pd.DataFrame.from_records(records).dropna(subset=["lat", "lon"])
+    reference["station_number"] = pd.to_numeric(
+        reference["station_number"], errors="coerce"
+    ).astype("Int64")
+    return reference
+
+
+def backfill_station_coordinates(
+    trips: pd.DataFrame, station_reference: pd.DataFrame
+) -> pd.DataFrame:
+    """Backfill missing start/end coordinates using station number or station name."""
+    out = trips.copy()
+
+    by_number = station_reference.dropna(subset=["station_number"]).drop_duplicates(
+        subset=["station_number"], keep="first"
+    )
+    number_to_lat = by_number.set_index("station_number")["lat"].to_dict()
+    number_to_lon = by_number.set_index("station_number")["lon"].to_dict()
+
+    by_name = (
+        station_reference.groupby("station_name", as_index=False)
+        .agg({"lat": "median", "lon": "median"})
+        .set_index("station_name")
+    )
+    name_to_lat = by_name["lat"].to_dict()
+    name_to_lon = by_name["lon"].to_dict()
+
+    out["start_lat"] = out["start_lat"].fillna(out["start_station_number"].map(number_to_lat))
+    out["start_lon"] = out["start_lon"].fillna(out["start_station_number"].map(number_to_lon))
+    out["end_lat"] = out["end_lat"].fillna(out["end_station_number"].map(number_to_lat))
+    out["end_lon"] = out["end_lon"].fillna(out["end_station_number"].map(number_to_lon))
+
+    out["start_lat"] = out["start_lat"].fillna(out["start_station"].map(name_to_lat))
+    out["start_lon"] = out["start_lon"].fillna(out["start_station"].map(name_to_lon))
+    out["end_lat"] = out["end_lat"].fillna(out["end_station"].map(name_to_lat))
+    out["end_lon"] = out["end_lon"].fillna(out["end_station"].map(name_to_lon))
+    return out
 
 
 def standardize_station_coordinates(trips: pd.DataFrame) -> pd.DataFrame:
@@ -587,7 +845,14 @@ def hydrate_routes(
         to_fetch = missing
         to_fallback = []
 
-    LOGGER.info("Fetching %d OSRM routes with %d workers", len(to_fetch), osrm_workers)
+    total_to_fetch = len(to_fetch)
+    LOGGER.info(
+        "Fetching %d OSRM routes with %d workers (qps=%.2f, timeout=%ss)",
+        total_to_fetch,
+        osrm_workers,
+        osrm_qps,
+        timeout,
+    )
 
     def fetch_pair(pair: tuple[float, float, float, float]) -> RouteResult:
         start_lon, start_lat, end_lon, end_lat = pair
@@ -618,13 +883,32 @@ def hydrate_routes(
     with concurrent.futures.ThreadPoolExecutor(max_workers=osrm_workers) as pool:
         futures = {pool.submit(fetch_pair, pair): pair for pair in to_fetch}
         completed = 0
+        started_at = time.monotonic()
+        last_progress_log_at = started_at
+        progress_interval_count = max(50, total_to_fetch // 100 if total_to_fetch else 1)
         for future in concurrent.futures.as_completed(futures):
             completed += 1
             result = future.result()
             key = route_key(result.start_lon, result.start_lat, result.end_lon, result.end_lat)
             cache[key] = result
-            if completed % 500 == 0 or completed == len(futures):
-                LOGGER.info("Resolved %d/%d OSRM pairs", completed, len(futures))
+            now = time.monotonic()
+            should_log_by_count = completed % progress_interval_count == 0
+            should_log_by_time = now - last_progress_log_at >= 10.0
+            if should_log_by_count or should_log_by_time or completed == total_to_fetch:
+                elapsed_s = max(now - started_at, 1e-6)
+                rate = completed / elapsed_s
+                remaining = max(total_to_fetch - completed, 0)
+                eta_s = int(remaining / rate) if rate > 0 else -1
+                LOGGER.info(
+                    "OSRM progress: %d/%d (%.1f%%) | %.1f pairs/s | elapsed %ds | eta %ss",
+                    completed,
+                    total_to_fetch,
+                    (completed / total_to_fetch) * 100 if total_to_fetch else 100.0,
+                    rate,
+                    int(elapsed_s),
+                    eta_s if eta_s >= 0 else "?",
+                )
+                last_progress_log_at = now
 
     for start_lon, start_lat, end_lon, end_lat in to_fallback:
         result = RouteResult(
@@ -649,7 +933,17 @@ def write_daily_parquet(trips: pd.DataFrame, out_dir: Path) -> list[Path]:
         ordered = day_frame.sort_values("start_time").reset_index(drop=True)
         target = out_dir / f"{day.isoformat()}.parquet"
         table = pa.Table.from_pandas(
-            ordered[["trip_id", "start_time", "end_time", "route_geometry"]],
+            ordered[
+                [
+                    "trip_id",
+                    "start_time",
+                    "end_time",
+                    "route_geometry",
+                    "route_source",
+                    "route_distance_m",
+                    "route_duration_s",
+                ]
+            ],
             preserve_index=False,
         )
         pq.write_table(
@@ -663,7 +957,7 @@ def write_daily_parquet(trips: pd.DataFrame, out_dir: Path) -> list[Path]:
     return file_paths
 
 
-def process_month(args: argparse.Namespace) -> None:
+def process_month(args: argparse.Namespace) -> dict[str, object]:
     month_start, month_end = parse_month(args.month)
     session = build_http_session()
 
@@ -684,6 +978,11 @@ def process_month(args: argparse.Namespace) -> None:
         normalized = normalized[
             (normalized["start_time"] >= month_start) & (normalized["start_time"] < month_end)
         ].copy()
+        LOGGER.info(
+            "Prepared %d rows from %s after normalization + month filter",
+            len(normalized),
+            csv_path.name,
+        )
         normalized_frames.append(normalized)
 
     if not normalized_frames:
@@ -693,12 +992,20 @@ def process_month(args: argparse.Namespace) -> None:
     trips = trips.drop_duplicates(
         subset=["trip_id", "start_time", "end_time", "start_station", "end_station"]
     )
+    station_reference = load_bikepoint_station_reference(
+        session=session, timeout=args.request_timeout
+    )
+    trips = backfill_station_coordinates(trips, station_reference)
     trips = standardize_station_coordinates(trips)
     trips = trips.sort_values("start_time").reset_index(drop=True)
 
     if args.max_trips is not None:
-        trips = trips.head(args.max_trips).copy()
-        LOGGER.warning("Trimmed to first %d trips due to --max-trips", len(trips))
+        trips = cap_trips(
+            trips=trips,
+            max_trips=args.max_trips,
+            strategy=args.max_trips_strategy,
+            seed=args.max_trips_seed,
+        )
 
     trips = trips.round({"start_lon": 6, "start_lat": 6, "end_lon": 6, "end_lat": 6})
     trips["route_key"] = trips.apply(
@@ -723,29 +1030,38 @@ def process_month(args: argparse.Namespace) -> None:
         if key in route_cache
         else straight_line_polyline6(0.0, 0.0, 0.0, 0.0)
     )
+    trips["route_source"] = trips["route_key"].map(
+        lambda key: route_cache[key].route_source if key in route_cache else "fallback_missing"
+    )
+    trips["route_distance_m"] = trips["route_key"].map(
+        lambda key: route_cache[key].route_distance_m if key in route_cache else 0.0
+    )
+    trips["route_duration_s"] = trips["route_key"].map(
+        lambda key: route_cache[key].route_duration_s if key in route_cache else 0.0
+    )
     trips = trips.drop(columns=["route_key", "source_file"])
 
     parquet_dir = Path(args.output_dir)
     parquet_paths = write_daily_parquet(trips, parquet_dir)
-
-    metadata = {
-        "month": args.month,
-        "trip_count": int(len(trips)),
-        "date_range_utc": {
-            "min_start_time": trips["start_time"].min().isoformat(),
-            "max_end_time": trips["end_time"].max().isoformat(),
-        },
-        "parquet_files": [path.name for path in parquet_paths],
-        "routes_cached": len(route_cache),
-        "created_at_utc": datetime.now(timezone.utc).isoformat(),
-    }
-    metadata_path = parquet_dir / "manifest.json"
-    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    metadata_path = write_dataset_manifest(
+        parquet_dir=parquet_dir,
+        month=args.month,
+        run_trip_count=len(trips),
+        run_start_time=trips["start_time"].min(),
+        run_end_time=trips["end_time"].max(),
+        route_cache_size=len(route_cache),
+    )
 
     LOGGER.info("Pipeline complete.")
     LOGGER.info("Trips exported: %d", len(trips))
     LOGGER.info("Parquet files: %d -> %s", len(parquet_paths), parquet_dir)
     LOGGER.info("Manifest: %s", metadata_path)
+    return {
+        "month": args.month,
+        "trip_count": int(len(trips)),
+        "manifest_path": str(metadata_path),
+        "parquet_paths": [str(path) for path in parquet_paths],
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -759,8 +1075,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--tfl-base-url",
-        default="https://cycling.data.tfl.gov.uk/usage-stats/",
-        help="TfL usage stats index URL.",
+        default="https://s3-eu-west-1.amazonaws.com/cycling.data.tfl.gov.uk/?list-type=2&prefix=usage-stats/",
+        help="TfL usage stats index URL (S3 listing URL or HTML index page).",
     )
     parser.add_argument(
         "--osrm-url",
@@ -810,6 +1126,18 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Optional cap for number of trips processed (for smoke testing).",
+    )
+    parser.add_argument(
+        "--max-trips-strategy",
+        choices=("uniform", "earliest"),
+        default="uniform",
+        help="How to apply --max-trips: 'uniform' samples across month, 'earliest' keeps oldest rows.",
+    )
+    parser.add_argument(
+        "--max-trips-seed",
+        type=int,
+        default=42,
+        help="Random seed used when --max-trips-strategy=uniform.",
     )
     parser.add_argument(
         "--max-new-routes",

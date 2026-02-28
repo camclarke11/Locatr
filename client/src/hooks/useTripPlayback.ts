@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as chrono from "chrono-node";
 
 import { PARQUET_GLOB_URL, WINDOW_SIZE_MS } from "../config";
-import { DuckDBTripClient } from "../lib/duckdbTripClient";
+import { DuckDBTripClient, type DuckDBInitProgress } from "../lib/duckdbTripClient";
 import { clamp } from "../lib/time";
 import type { DecodedTrip, EncodedTrip, PlaybackSpeed, TimeBounds } from "../types";
 
@@ -12,16 +12,50 @@ type DecoderWorkerResponse = {
 };
 
 const KEEP_WINDOW_DISTANCE = 3;
-const WINDOW_QUERY_LIMIT = 120_000;
+const WINDOW_QUERY_LIMIT = 80_000;
+const PLAY_PAUSE_EASE_MULTIPLIER = 1.75;
+const PLAY_EASE_IN_MS = 420 * PLAY_PAUSE_EASE_MULTIPLIER;
+const PLAY_EASE_OUT_MS = 520 * PLAY_PAUSE_EASE_MULTIPLIER;
+
+function buildTroubleshootingHints(message: string | null): string[] {
+  if (!message) {
+    return [];
+  }
+  const lower = message.toLowerCase();
+  const hints: string[] = [];
+  if (lower.includes("manifest.json")) {
+    hints.push("Verify /data/parquet/manifest.json is reachable in the browser.");
+  }
+  if (lower.includes("parquet_files")) {
+    hints.push("Ensure manifest.json has a non-empty parquet_files array.");
+  }
+  if (lower.includes("no magic bytes")) {
+    hints.push("A URL was read as a non-parquet file. Confirm parquet file paths are valid.");
+  }
+  if (lower.includes("too small to be a parquet")) {
+    hints.push("A parquet file response was too small; try hard-refresh and confirm file sync completed.");
+  }
+  if (lower.includes("read_parquet")) {
+    hints.push("Check parquet schema compatibility and confirm files are not corrupted.");
+  }
+  if (hints.length === 0) {
+    hints.push("Check browser Network/Console for failed file requests or CORS issues.");
+  }
+  return hints;
+}
 
 export function useTripPlayback() {
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState<string | null>(null);
+  const [loadingMessage, setLoadingMessage] = useState("Initializing playback...");
+  const [runtimeMessage, setRuntimeMessage] = useState<string | null>(null);
+  const [troubleshootingHints, setTroubleshootingHints] = useState<string[]>([]);
+  const [initProgress, setInitProgress] = useState<DuckDBInitProgress | null>(null);
   const [jumpError, setJumpError] = useState<string | null>(null);
   const [bounds, setBounds] = useState<TimeBounds | null>(null);
   const [currentTimeMs, setCurrentTimeMs] = useState<number>(Date.now());
   const [isPlaying, setIsPlaying] = useState(false);
-  const [speed, setSpeed] = useState<PlaybackSpeed>(10);
+  const [speed, setSpeed] = useState<PlaybackSpeed>(60);
   const [decodedTrips, setDecodedTrips] = useState<DecodedTrip[]>([]);
   const [encodedTrips, setEncodedTrips] = useState<EncodedTrip[]>([]);
   const [cacheVersion, setCacheVersion] = useState(0);
@@ -32,6 +66,17 @@ export function useTripPlayback() {
   const workerRef = useRef<Worker | null>(null);
   const decodeRequestRef = useRef(0);
   const latestRequestRef = useRef(0);
+  const isPlayingRef = useRef(isPlaying);
+  const speedRef = useRef(speed);
+  const playbackBlendRef = useRef(0);
+
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+
+  useEffect(() => {
+    speedRef.current = speed;
+  }, [speed]);
 
   const currentWindowKey = Math.floor(currentTimeMs / WINDOW_SIZE_MS);
 
@@ -40,23 +85,36 @@ export function useTripPlayback() {
     const init = async (): Promise<void> => {
       try {
         setStatus("loading");
+        setLoadingMessage("Initializing DuckDB WASM...");
+        setError(null);
+        setTroubleshootingHints([]);
+        setInitProgress(null);
         clientRef.current = new DuckDBTripClient();
-        const tripBounds = await clientRef.current.init(PARQUET_GLOB_URL);
+        setLoadingMessage("Resolving parquet files and creating query view...");
+        const tripBounds = await clientRef.current.init(PARQUET_GLOB_URL, (progress) => {
+          if (!isMounted) {
+            return;
+          }
+          setInitProgress(progress);
+          setLoadingMessage(progress.message);
+        });
         if (!isMounted) {
           return;
         }
         setBounds(tripBounds);
         setCurrentTimeMs(tripBounds.minMs);
+        setLoadingMessage("Playback ready.");
         setStatus("ready");
       } catch (initError) {
         if (!isMounted) {
           return;
         }
-        setError(
+        const message =
           initError instanceof Error
             ? initError.message
-            : "Failed to initialize DuckDB WASM.",
-        );
+            : "Failed to initialize DuckDB WASM.";
+        setError(message);
+        setTroubleshootingHints(buildTroubleshootingHints(message));
         setStatus("error");
       }
     };
@@ -80,19 +138,24 @@ export function useTripPlayback() {
       const windowStart = windowKey * WINDOW_SIZE_MS;
       const windowEnd = windowStart + WINDOW_SIZE_MS;
       try {
+        setRuntimeMessage(
+          `Querying trips ${new Date(windowStart).toLocaleString()} - ${new Date(windowEnd).toLocaleString()}...`,
+        );
         const rows = await clientRef.current.fetchWindow(
           windowStart,
           windowEnd,
           WINDOW_QUERY_LIMIT,
         );
         cacheRef.current.set(windowKey, rows);
+        setRuntimeMessage(`Decoding ${rows.length.toLocaleString()} trip polylines...`);
         setCacheVersion((version) => version + 1);
       } catch (windowError) {
-        setError(
+        const message =
           windowError instanceof Error
             ? windowError.message
-            : "Failed to fetch trips for current window.",
-        );
+            : "Failed to fetch trips for current window.";
+        setError(message);
+        setTroubleshootingHints(buildTroubleshootingHints(message));
         setStatus("error");
       } finally {
         inFlightRef.current.delete(windowKey);
@@ -147,6 +210,7 @@ export function useTripPlayback() {
         return;
       }
       setDecodedTrips(event.data.trips);
+      setRuntimeMessage(null);
     };
     worker.addEventListener("message", onWorkerMessage);
 
@@ -166,11 +230,15 @@ export function useTripPlayback() {
     workerRef.current.postMessage({
       requestId: decodeRequestRef.current,
       trips: encodedTrips,
+      timeOffsetMs: bounds?.minMs ?? 0,
     });
-  }, [encodedTrips]);
+  }, [bounds?.minMs, encodedTrips]);
 
   useEffect(() => {
-    if (!isPlaying || !bounds) {
+    if (!bounds) {
+      return;
+    }
+    if (!isPlaying && playbackBlendRef.current <= 0.0001) {
       return;
     }
 
@@ -178,23 +246,40 @@ export function useTripPlayback() {
     let previousTimestamp = performance.now();
 
     const step = (timestamp: number): void => {
-      const deltaMs = timestamp - previousTimestamp;
+      const deltaMs = Math.max(0, timestamp - previousTimestamp);
       previousTimestamp = timestamp;
 
-      setCurrentTimeMs((previous) => {
-        const next = previous + deltaMs * speed;
-        if (next >= bounds.maxMs) {
-          setIsPlaying(false);
-          return bounds.maxMs;
-        }
-        return next;
-      });
-      animationFrameId = window.requestAnimationFrame(step);
+      const targetBlend = isPlayingRef.current ? 1 : 0;
+      const blend = playbackBlendRef.current;
+      const easingMs = targetBlend > blend ? PLAY_EASE_IN_MS : PLAY_EASE_OUT_MS;
+      const blendStep = easingMs > 0 ? deltaMs / easingMs : 1;
+      const nextBlend =
+        targetBlend > blend
+          ? Math.min(targetBlend, blend + blendStep)
+          : Math.max(targetBlend, blend - blendStep);
+      playbackBlendRef.current = nextBlend;
+
+      if (nextBlend > 0) {
+        setCurrentTimeMs((previous) => {
+          const next = previous + deltaMs * speedRef.current * nextBlend;
+          if (next >= bounds.maxMs) {
+            playbackBlendRef.current = 0;
+            isPlayingRef.current = false;
+            setIsPlaying(false);
+            return bounds.maxMs;
+          }
+          return next;
+        });
+      }
+
+      if (isPlayingRef.current || playbackBlendRef.current > 0.0001) {
+        animationFrameId = window.requestAnimationFrame(step);
+      }
     };
 
     animationFrameId = window.requestAnimationFrame(step);
     return () => window.cancelAnimationFrame(animationFrameId);
-  }, [bounds, isPlaying, speed]);
+  }, [bounds, isPlaying]);
 
   useEffect(() => {
     if (!bounds) {
@@ -269,6 +354,10 @@ export function useTripPlayback() {
   return {
     status,
     error,
+    loadingMessage,
+    runtimeMessage,
+    initProgress,
+    troubleshootingHints,
     jumpError,
     bounds,
     currentTimeMs,
@@ -279,5 +368,15 @@ export function useTripPlayback() {
     togglePlay,
     setSpeed,
     jumpToNaturalLanguage,
+    diagnostics: {
+      parquetGlobUrl: PARQUET_GLOB_URL,
+      currentWindowKey,
+      cachedWindows: cacheRef.current.size,
+      inFlightWindows: inFlightRef.current.size,
+      windowQueryLimit: WINDOW_QUERY_LIMIT,
+      initTotalFiles: initProgress?.totalFiles ?? 0,
+      initUsableFiles: initProgress?.usableFiles ?? 0,
+      initSkippedFiles: initProgress?.skippedFiles ?? 0,
+    },
   };
 }
