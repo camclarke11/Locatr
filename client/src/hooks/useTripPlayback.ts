@@ -201,12 +201,25 @@ export function useTripPlayback() {
       return;
     }
 
+    const isInteractiveTarget = (target: EventTarget | null): boolean => {
+      if (!(target instanceof HTMLElement)) {
+        return false;
+      }
+      if (target.isContentEditable) {
+        return true;
+      }
+      return Boolean(target.closest("input, textarea, select, button, [role='button']"));
+    };
+
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.target instanceof HTMLInputElement) {
+      if (isInteractiveTarget(event.target)) {
         return;
       }
 
       if (event.code === "Space") {
+        if (event.repeat) {
+          return;
+        }
         event.preventDefault();
         setIsPlaying((playing) => !playing);
         return;
