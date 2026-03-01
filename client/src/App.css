@@ -345,6 +345,15 @@
   line-height: 1.38;
 }
 
+.commandRail__hint {
+  margin: 0.36rem 0 0;
+  padding: 0 0.12rem;
+  color: #a9bfdc;
+  font-size: 0.66rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
 .commandRail__timeline {
   margin-top: 0.42rem;
   border: 1px solid rgba(122, 153, 204, 0.23);
@@ -462,6 +471,242 @@
   margin: 0.4rem 0 0;
   color: #ffd8d8;
   font-size: 0.73rem;
+}
+
+.lineInspector {
+  margin-top: 0.55rem;
+  border: 1px solid rgba(122, 153, 204, 0.24);
+  border-radius: 0.78rem;
+  background: rgba(10, 17, 29, 0.8);
+  padding: 0.52rem;
+}
+
+.lineInspector__header {
+  display: grid;
+  gap: 0.1rem;
+  margin-bottom: 0.5rem;
+}
+
+.lineInspector__kicker {
+  margin: 0;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: #9fb3d8;
+  font-weight: 700;
+}
+
+.lineInspector__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 0.97rem;
+  color: #f2f7ff;
+  letter-spacing: 0.03em;
+}
+
+.lineInspector__controls {
+  display: grid;
+  gap: 0.38rem;
+}
+
+.lineInspector__field {
+  display: grid;
+  gap: 0.2rem;
+  margin: 0;
+}
+
+.lineInspector__field span {
+  font-size: 0.64rem;
+  color: #9fb5da;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+}
+
+.lineInspector__select {
+  width: 100%;
+}
+
+.lineInspector__direction {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.3rem;
+}
+
+.lineInspector__dirButton {
+  border: 1px solid rgba(120, 150, 206, 0.34);
+  border-radius: 0.55rem;
+  background: rgba(14, 24, 41, 0.86);
+  color: #cbdaef;
+  font-family: var(--font-body);
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.26rem 0.42rem;
+  cursor: pointer;
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease,
+    color 140ms ease;
+}
+
+.lineInspector__dirButton:hover {
+  border-color: rgba(162, 207, 255, 0.62);
+}
+
+.lineInspector__dirButton.isActive {
+  border-color: rgba(160, 219, 255, 0.9);
+  color: #041425;
+  background: linear-gradient(135deg, rgba(97, 176, 255, 0.95), rgba(131, 224, 255, 0.94));
+}
+
+.lineInspector__stationList {
+  margin-top: 0.44rem;
+  border: 1px solid rgba(119, 150, 202, 0.24);
+  border-radius: 0.62rem;
+  background: rgba(13, 21, 35, 0.74);
+  overflow-y: auto;
+  max-height: 12.2rem;
+}
+
+.lineInspector__station {
+  width: 100%;
+  border: none;
+  border-top: 1px solid rgba(118, 148, 200, 0.17);
+  background: transparent;
+  color: inherit;
+  display: grid;
+  grid-template-columns: 1.5rem 1fr auto;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.42rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.lineInspector__station:first-child {
+  border-top: none;
+}
+
+.lineInspector__station:hover {
+  background: rgba(25, 41, 66, 0.46);
+}
+
+.lineInspector__station.isActive {
+  background: rgba(54, 98, 155, 0.42);
+}
+
+.lineInspector__stationIndex {
+  width: 1.28rem;
+  height: 1.28rem;
+  border-radius: 999px;
+  border: 1px solid rgba(142, 176, 228, 0.42);
+  display: inline-grid;
+  place-items: center;
+  color: #cad9f1;
+  font-size: 0.64rem;
+  font-weight: 700;
+}
+
+.lineInspector__stationBody {
+  display: grid;
+  min-width: 0;
+}
+
+.lineInspector__stationName {
+  font-size: 0.77rem;
+  color: #e3edf9;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lineInspector__stationMeta {
+  margin-top: 0.05rem;
+  font-size: 0.62rem;
+  color: #95add5;
+  letter-spacing: 0.03em;
+}
+
+.lineInspector__stationCount {
+  min-width: 1.5rem;
+  text-align: right;
+  font-size: 0.65rem;
+  color: #9fc0ea;
+  font-weight: 700;
+}
+
+.lineInspector__board {
+  margin-top: 0.5rem;
+  border: 1px solid rgba(119, 150, 202, 0.24);
+  border-radius: 0.62rem;
+  background: rgba(13, 21, 35, 0.74);
+  padding: 0.42rem;
+}
+
+.lineInspector__boardTitle {
+  margin: 0;
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #a0b6da;
+  font-weight: 700;
+}
+
+.lineInspector__boardList {
+  margin: 0.4rem 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.28rem;
+}
+
+.lineInspector__boardItem {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 0.34rem;
+  min-width: 0;
+}
+
+.lineInspector__linePill {
+  border-radius: 999px;
+  padding: 0.13rem 0.37rem;
+  color: rgba(7, 16, 31, 0.92);
+  font-size: 0.6rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.lineInspector__destination {
+  min-width: 0;
+  font-size: 0.7rem;
+  color: #d7e4f8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lineInspector__eta {
+  font-size: 0.66rem;
+  color: #eaf3ff;
+  font-weight: 700;
+}
+
+.lineInspector__clock {
+  font-size: 0.64rem;
+  color: #9eb4d6;
+}
+
+.lineInspector__empty {
+  margin: 0.4rem 0 0;
+  font-size: 0.7rem;
+  color: #a7bbdc;
+  line-height: 1.35;
 }
 
 .appStatus {
@@ -669,6 +914,77 @@
   color: #405e87;
 }
 
+.appRoot--light .commandRail__hint {
+  color: #6684ad;
+}
+
+.appRoot--light .lineInspector {
+  border-color: rgba(106, 136, 186, 0.34);
+  background: rgba(245, 249, 255, 0.88);
+}
+
+.appRoot--light .lineInspector__kicker {
+  color: #607ca8;
+}
+
+.appRoot--light .lineInspector__title {
+  color: #1d3256;
+}
+
+.appRoot--light .lineInspector__field span {
+  color: #617ea9;
+}
+
+.appRoot--light .lineInspector__dirButton {
+  border-color: rgba(107, 140, 191, 0.42);
+  background: rgba(242, 247, 255, 0.95);
+  color: #36507b;
+}
+
+.appRoot--light .lineInspector__dirButton.isActive {
+  color: #071524;
+}
+
+.appRoot--light .lineInspector__stationList,
+.appRoot--light .lineInspector__board {
+  border-color: rgba(106, 136, 186, 0.34);
+  background: rgba(245, 249, 255, 0.92);
+}
+
+.appRoot--light .lineInspector__station {
+  border-top-color: rgba(107, 140, 191, 0.24);
+}
+
+.appRoot--light .lineInspector__station:hover {
+  background: rgba(219, 233, 255, 0.55);
+}
+
+.appRoot--light .lineInspector__station.isActive {
+  background: rgba(162, 199, 246, 0.56);
+}
+
+.appRoot--light .lineInspector__stationIndex {
+  border-color: rgba(102, 136, 185, 0.45);
+  color: #46618d;
+}
+
+.appRoot--light .lineInspector__stationName {
+  color: #27416a;
+}
+
+.appRoot--light .lineInspector__stationMeta,
+.appRoot--light .lineInspector__stationCount,
+.appRoot--light .lineInspector__clock,
+.appRoot--light .lineInspector__boardTitle,
+.appRoot--light .lineInspector__empty {
+  color: #5b769f;
+}
+
+.appRoot--light .lineInspector__destination,
+.appRoot--light .lineInspector__eta {
+  color: #243f68;
+}
+
 .appRoot--light .commandRail__time {
   color: #1f3354;
 }
@@ -698,6 +1014,10 @@
     left: 0.6rem;
     width: min(18.4rem, calc(100vw - 1.2rem));
   }
+
+  .lineInspector__stationList {
+    max-height: 9.5rem;
+  }
 }
 
 @media (max-width: 620px) {
@@ -715,6 +1035,32 @@
     top: 3.85rem;
     right: 0.58rem;
     width: min(15.6rem, calc(100vw - 1.16rem));
+  }
+
+  .lineInspector__boardItem {
+    grid-template-columns: auto 1fr auto;
+    grid-template-areas:
+      "line destination eta"
+      "line destination clock";
+    row-gap: 0.08rem;
+  }
+
+  .lineInspector__linePill {
+    grid-area: line;
+  }
+
+  .lineInspector__destination {
+    grid-area: destination;
+  }
+
+  .lineInspector__eta {
+    grid-area: eta;
+    justify-self: end;
+  }
+
+  .lineInspector__clock {
+    grid-area: clock;
+    justify-self: end;
   }
 }
 

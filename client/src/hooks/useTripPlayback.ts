@@ -17,6 +17,10 @@ const PLAY_PAUSE_EASE_MULTIPLIER = 1.75;
 const PLAY_EASE_IN_MS = 420 * PLAY_PAUSE_EASE_MULTIPLIER;
 const PLAY_EASE_OUT_MS = 520 * PLAY_PAUSE_EASE_MULTIPLIER;
 
+type UseTripPlaybackOptions = {
+  keyboardShortcutsEnabled?: boolean;
+};
+
 function buildTroubleshootingHints(message: string | null): string[] {
   if (!message) {
     return [];
@@ -44,7 +48,8 @@ function buildTroubleshootingHints(message: string | null): string[] {
   return hints;
 }
 
-export function useTripPlayback() {
+export function useTripPlayback(options?: UseTripPlaybackOptions) {
+  const keyboardShortcutsEnabled = options?.keyboardShortcutsEnabled ?? true;
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState<string | null>(null);
   const [loadingMessage, setLoadingMessage] = useState("Initializing playback...");
@@ -282,7 +287,7 @@ export function useTripPlayback() {
   }, [bounds, isPlaying]);
 
   useEffect(() => {
-    if (!bounds) {
+    if (!bounds || !keyboardShortcutsEnabled) {
       return;
     }
 
@@ -318,7 +323,7 @@ export function useTripPlayback() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [bounds]);
+  }, [bounds, keyboardShortcutsEnabled]);
 
   const setPlaybackTime = useCallback(
     (nextTimeMs: number) => {

@@ -398,6 +398,7 @@ export function buildTubeLiveTrainMarkers(
   arrivals: TubeArrival[],
   lines: TubeLineMeta[],
   stations: TubeStation[],
+  timestampMs = Date.now(),
 ): TubeLiveTrainMarker[] {
   const linesById = new Map(lines.map((line) => [line.lineId, line]));
   const stationById = new Map(stations.map((station) => [station.id, station]));
@@ -412,6 +413,12 @@ export function buildTubeLiveTrainMarkers(
     if (!nextStation) {
       continue;
     }
+    const arrivalTimestampMs = Date.parse(arrival.timestamp);
+    const elapsedSec = Number.isFinite(arrivalTimestampMs)
+      ? Math.max(0, (timestampMs - arrivalTimestampMs) / 1000)
+      : 0;
+    const adjustedTimeToStation = Math.max(0, arrival.timeToStation - elapsedSec);
+
     const direction = chooseDirection(line, arrival.naptanId, arrival.destinationNaptanId);
     const trainKey = `${arrival.lineId}:${arrival.vehicleId || `${arrival.naptanId}:${arrival.timestamp}`}`;
     if (!direction) {
@@ -424,7 +431,7 @@ export function buildTubeLiveTrainMarkers(
         progress01: 0,
         isInterpolated: false,
         destinationName: arrival.towards,
-        timeToStation: arrival.timeToStation,
+        timeToStation: adjustedTimeToStation,
       });
       continue;
     }
@@ -444,12 +451,12 @@ export function buildTubeLiveTrainMarkers(
         progress01: 0,
         isInterpolated: false,
         destinationName: arrival.towards,
-        timeToStation: arrival.timeToStation,
+        timeToStation: adjustedTimeToStation,
       });
       continue;
     }
 
-    const progress01 = clamp01(1 - arrival.timeToStation / segmentDuration);
+    const progress01 = clamp01(1 - adjustedTimeToStation / segmentDuration);
     const from: [number, number] = [prevStation.lon, prevStation.lat];
     const to: [number, number] = [nextStation.lon, nextStation.lat];
     markers.push({
@@ -461,7 +468,7 @@ export function buildTubeLiveTrainMarkers(
       progress01,
       isInterpolated: true,
       destinationName: arrival.towards,
-      timeToStation: arrival.timeToStation,
+      timeToStation: adjustedTimeToStation,
     });
   }
 

@@ -2,8 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import DeckGL from "@deck.gl/react";
 import { TripsLayer } from "@deck.gl/geo-layers";
 import { IconLayer, PathLayer, ScatterplotLayer, SolidPolygonLayer } from "@deck.gl/layers";
-import MapView from "react-map-gl/maplibre";
+import MapView, { type MapRef } from "react-map-gl/maplibre";
 import type { Layer, MapViewState, PickingInfo } from "@deck.gl/core";
+import type { Map as MapLibreMap, StyleSpecification } from "maplibre-gl";
+import { GL } from "@luma.gl/constants";
 
 import {
   DARK_MAP_STYLE_URL,
@@ -35,6 +37,7 @@ import {
 import type {
   DecodedTrip,
   TubeArrival,
+  TubeDirection,
   TubeHistoricalFrame,
   TubeLiveActionsByLine,
   TubeLineMeta,
@@ -49,6 +52,7 @@ import "./App.css";
 type RouteFilterMode = "all" | "osrm" | "fallback";
 type AppMode = "playback" | "live" | "tube";
 type ThemeMode = "dark" | "light";
+type CinematicTourId = "thames-loop" | "ride-rush" | "tube-radar";
 type ColorTrip = Pick<DecodedTrip, "tripId" | "routeSource">;
 type ArrowCategory = "ebike" | "classic" | "unlocked" | "docked";
 type ArrowMarker = {
@@ -65,7 +69,43 @@ type PulseMarker = {
   color: [number, number, number, number];
   radius: number;
 };
+type TubeLineBranchOption = {
+  key: string;
+  stationIds: string[];
+  label: string;
+};
+type TubeDepartureBoardEntry = {
+  id: string;
+  lineId: string;
+  lineName: string;
+  lineColor: [number, number, number];
+  destination: string;
+  etaSeconds: number;
+  etaLabel: string;
+  expectedTimeLabel: string;
+};
+type CameraPose = {
+  longitude: number;
+  latitude: number;
+  zoom: number;
+  pitch: number;
+  bearing: number;
+};
+type CinematicTourKeyframe = CameraPose & {
+  durationMs: number;
+};
+type CinematicTourDefinition = {
+  id: CinematicTourId;
+  label: string;
+  subtitle: string;
+  keyframes: CinematicTourKeyframe[];
+};
 const THEME_STORAGE_KEY = "locatr.theme";
+const THREE_D_BUILDINGS_LAYER_ID = "locatr-3d-buildings";
+const THREE_D_MIN_ZOOM = 13;
+const THREE_D_TARGET_PITCH = 58;
+const THREE_D_TARGET_BEARING = -16;
+const THREE_D_MIN_ZOOM_TARGET = 12.8;
 const EVENT_PULSE_WINDOW_MS = 14_000;
 const ARROW_LEAD_SEGMENTS = 0.08;
 const TRIP_TRAIL_LENGTH_SECONDS = 180;
@@ -73,6 +113,11 @@ const TRIP_TRAIL_OPACITY = 0.24;
 const TRIP_TRAIL_MIN_WIDTH_PX = 3;
 const FOLLOW_BLEND_FACTOR = 0.2;
 const FOLLOW_LOOKAHEAD_SEGMENTS = 0.28;
+const CINEMATIC_MIN_SEGMENT_MS = 750;
+const TUBE_LIVE_CLOCK_FRAME_MS = 33;
+const TUBE_HISTORY_EASE_MULTIPLIER = 2;
+const TUBE_HISTORY_EASE_IN_MS = 420 * TUBE_HISTORY_EASE_MULTIPLIER;
+const TUBE_HISTORY_EASE_OUT_MS = 560 * TUBE_HISTORY_EASE_MULTIPLIER;
 const FOCUS_DIM_OVERLAY_DARK: [number, number, number, number] = [0, 0, 0, 150];
 const FOCUS_DIM_OVERLAY_LIGHT: [number, number, number, number] = [255, 255, 255, 118];
 const DIM_OVERLAY_POLYGON = [
@@ -108,6 +153,39 @@ const ARROW_ICON_MAPPING = {
     mask: true,
   },
 } as const;
+const TRAIN_BODY_ICON_ATLAS = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(
+  `<svg xmlns="http://www.w3.org/2000/svg" width="192" height="96" viewBox="0 0 192 96">
+    <path d="M24 48C24 31 38 16 56 16H126C146 16 163 30 169 48C163 66 146 80 126 80H56C38 80 24 65 24 48Z" fill="white"/>
+    <rect x="150" y="30" width="16" height="36" rx="8" fill="white"/>
+  </svg>`,
+)}`;
+const TRAIN_BODY_ICON_MAPPING = {
+  train: {
+    x: 0,
+    y: 0,
+    width: 192,
+    height: 96,
+    anchorX: 96,
+    anchorY: 48,
+    mask: true,
+  },
+} as const;
+const TRAIN_NOSE_ICON_ATLAS = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(
+  `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96">
+    <polygon points="34,30 66,48 34,66" fill="white"/>
+  </svg>`,
+)}`;
+const TRAIN_NOSE_ICON_MAPPING = {
+  nose: {
+    x: 0,
+    y: 0,
+    width: 96,
+    height: 96,
+    anchorX: 48,
+    anchorY: 48,
+    mask: true,
+  },
+} as const;
 const ARROW_COLORS: Record<ArrowCategory, [number, number, number, number]> = {
   ebike: [110, 196, 255, 230],
   classic: [183, 146, 255, 230],
@@ -116,6 +194,9 @@ const ARROW_COLORS: Record<ArrowCategory, [number, number, number, number]> = {
 };
 const TUBE_TRAIN_COLOR: [number, number, number, number] = [255, 236, 92, 250];
 const TUBE_TRAIN_GLOW_COLOR: [number, number, number, number] = [255, 132, 48, 172];
+const TUBE_LIVE_TRAIN_SHADOW_COLOR: [number, number, number, number] = [5, 9, 18, 178];
+const TUBE_LIVE_TRAIN_OUTLINE_COLOR: [number, number, number, number] = [230, 238, 250, 210];
+const TUBE_LIVE_TRAIN_NOSE_COLOR: [number, number, number, number] = [12, 18, 32, 228];
 const TUBE_STATION_BASE_COLOR: [number, number, number, number] = [78, 107, 147, 180];
 const TUBE_STATUS_COLORS: Record<number, [number, number, number, number]> = {
   10: [58, 176, 103, 215],
@@ -135,6 +216,14 @@ const DEFAULT_TUBE_TOPOLOGY_PROGRESS: TubeTopologyProgressEvent = {
   percent: 0,
   completedLines: 0,
   totalLines: 0,
+};
+
+const DEFAULT_TOUR_LOOKOUTS = {
+  westminster: [-0.1246, 51.5008] as [number, number],
+  soho: [-0.1337, 51.5136] as [number, number],
+  city: [-0.0928, 51.5149] as [number, number],
+  canaryWharf: [-0.0186, 51.5045] as [number, number],
+  kingsCross: [-0.1235, 51.5316] as [number, number],
 };
 
 function tubeTopologyProgressMessage(progress: TubeTopologyProgressEvent): string {
@@ -181,6 +270,40 @@ function interpolatePoint(
   t: number,
 ): [number, number] {
   return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+function easeInOutCubic(value: number): number {
+  if (value < 0.5) {
+    return 4 * value * value * value;
+  }
+  return 1 - ((-2 * value + 2) ** 3) / 2;
+}
+
+function normalizeBearing(value: number): number {
+  let result = value;
+  while (result <= -180) {
+    result += 360;
+  }
+  while (result > 180) {
+    result -= 360;
+  }
+  return result;
+}
+
+function interpolateBearing(from: number, to: number, t: number): number {
+  const normalizedFrom = normalizeBearing(from);
+  const normalizedTo = normalizeBearing(to);
+  let delta = normalizedTo - normalizedFrom;
+  if (delta > 180) {
+    delta -= 360;
+  } else if (delta < -180) {
+    delta += 360;
+  }
+  return normalizeBearing(normalizedFrom + delta * t);
 }
 
 function headingDegrees(
@@ -252,6 +375,86 @@ function isFallbackSource(routeSource: string): boolean {
   return routeSource !== "osrm";
 }
 
+function findFirstSymbolLayerId(style: StyleSpecification): string | undefined {
+  for (const layer of style.layers ?? []) {
+    if (layer.type === "symbol") {
+      return layer.id;
+    }
+  }
+  return undefined;
+}
+
+function findBuildingVectorLayer(style: StyleSpecification): {
+  source: string;
+  sourceLayer: string;
+} | null {
+  for (const layer of style.layers ?? []) {
+    if (!("source" in layer) || !("source-layer" in layer)) {
+      continue;
+    }
+    const source = layer.source;
+    const sourceLayer = layer["source-layer"];
+    if (typeof source !== "string" || typeof sourceLayer !== "string") {
+      continue;
+    }
+    const isBuildingLike =
+      layer.id.toLowerCase().includes("building")
+      || sourceLayer.toLowerCase().includes("building");
+    if (isBuildingLike) {
+      return { source, sourceLayer };
+    }
+  }
+  return null;
+}
+
+function syncThreeDBuildingsLayer(map: MapLibreMap, enabled: boolean): void {
+  const existing = map.getLayer(THREE_D_BUILDINGS_LAYER_ID);
+  if (existing) {
+    map.setLayoutProperty(
+      THREE_D_BUILDINGS_LAYER_ID,
+      "visibility",
+      enabled ? "visible" : "none",
+    );
+    return;
+  }
+  if (!enabled || !map.isStyleLoaded()) {
+    return;
+  }
+  const style = map.getStyle();
+  const buildingLayer = findBuildingVectorLayer(style);
+  if (!buildingLayer) {
+    return;
+  }
+  map.addLayer(
+    {
+      id: THREE_D_BUILDINGS_LAYER_ID,
+      type: "fill-extrusion",
+      source: buildingLayer.source,
+      "source-layer": buildingLayer.sourceLayer,
+      minzoom: THREE_D_MIN_ZOOM,
+      paint: {
+        "fill-extrusion-color": "#9db8dd",
+        "fill-extrusion-opacity": 0.76,
+        "fill-extrusion-height": [
+          "coalesce",
+          ["get", "height"],
+          ["get", "render_height"],
+          ["get", "building:height"],
+          14,
+        ],
+        "fill-extrusion-base": [
+          "coalesce",
+          ["get", "min_height"],
+          ["get", "render_min_height"],
+          ["get", "building:min_height"],
+          0,
+        ],
+      },
+    },
+    findFirstSymbolLayerId(style),
+  );
+}
+
 function shortName(pathOrUrl: string): string {
   try {
     const parsed = new URL(pathOrUrl);
@@ -275,6 +478,21 @@ function tubeStatusColor(severity: number | null): [number, number, number, numb
     return TUBE_STATION_BASE_COLOR;
   }
   return TUBE_STATUS_COLORS[Math.round(severity)] ?? [220, 78, 56, 225];
+}
+
+function tubeLiveTrainBodyColor(
+  marker: TubeLiveTrainMarker,
+  lineMap: Map<string, TubeLineMeta>,
+): [number, number, number, number] {
+  const lineColor = lineMap.get(marker.lineId)?.color ?? [165, 191, 230];
+  return [lineColor[0], lineColor[1], lineColor[2], marker.isInterpolated ? 236 : 206];
+}
+
+function tubeLiveTrainNoseColor(marker: TubeLiveTrainMarker): [number, number, number, number] {
+  if (!marker.isInterpolated) {
+    return [TUBE_LIVE_TRAIN_NOSE_COLOR[0], TUBE_LIVE_TRAIN_NOSE_COLOR[1], TUBE_LIVE_TRAIN_NOSE_COLOR[2], 0];
+  }
+  return TUBE_LIVE_TRAIN_NOSE_COLOR;
 }
 
 function tubeRunPositionAtTime(
@@ -305,7 +523,54 @@ function tubeRunPositionAtTime(
   return path[path.length - 1] ?? null;
 }
 
+function dedupeStationIds(stationIds: string[]): string[] {
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const stationId of stationIds) {
+    if (!stationId || seen.has(stationId)) {
+      continue;
+    }
+    seen.add(stationId);
+    output.push(stationId);
+  }
+  return output;
+}
+
+function routeTerminusLabel(
+  stationIds: string[],
+  stationById: Map<string, TubeStation>,
+): string {
+  const first = stationIds[0];
+  const last = stationIds[stationIds.length - 1];
+  if (!first || !last) {
+    return "Branch";
+  }
+  const firstName = stationById.get(first)?.name ?? first;
+  const lastName = stationById.get(last)?.name ?? last;
+  return `${firstName} to ${lastName}`;
+}
+
+function etaLabel(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 30) {
+    return "Due";
+  }
+  return `${Math.max(1, Math.round(seconds / 60))} min`;
+}
+
+function expectedTimeLabel(timestampIso: string): string {
+  const parsed = Date.parse(timestampIso);
+  if (!Number.isFinite(parsed)) {
+    return "--:--";
+  }
+  return new Date(parsed).toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 function App() {
+  const mapRef = useRef<MapRef | null>(null);
+  const [mode, setMode] = useState<AppMode>("playback");
   const {
     status,
     error,
@@ -324,8 +589,7 @@ function App() {
     setSpeed,
     jumpToNaturalLanguage,
     diagnostics,
-  } = useTripPlayback();
-  const [mode, setMode] = useState<AppMode>("playback");
+  } = useTripPlayback({ keyboardShortcutsEnabled: mode === "playback" });
   const [theme, setTheme] = useState<ThemeMode>(() => {
     if (typeof window === "undefined") {
       return "dark";
@@ -336,11 +600,14 @@ function App() {
     }
     return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   });
+  const [is3DMode, setIs3DMode] = useState(false);
   const [routeFilter, setRouteFilter] = useState<RouteFilterMode>("osrm");
   const [hoveredTrip, setHoveredTrip] = useState<DecodedTrip | null>(null);
   const [selectedTrip, setSelectedTrip] = useState<DecodedTrip | null>(null);
   const [autoRandomFollowEnabled, setAutoRandomFollowEnabled] = useState(false);
   const [viewState, setViewState] = useState<MapViewState>(LONDON_VIEW_STATE);
+  const [cinematicTourId, setCinematicTourId] = useState<CinematicTourId>("thames-loop");
+  const [cinematicTourPlaying, setCinematicTourPlaying] = useState(false);
   const [liveStations, setLiveStations] = useState<BikePointStation[]>([]);
   const [liveStatus, setLiveStatus] = useState<"idle" | "loading" | "ready" | "error">(
     "idle",
@@ -368,6 +635,10 @@ function App() {
   const [tubeLiveClockMs, setTubeLiveClockMs] = useState<number>(Date.now());
   const [tubeLastRefreshMs, setTubeLastRefreshMs] = useState<number | null>(null);
   const [tubeLineFilters, setTubeLineFilters] = useState<string[]>([]);
+  const [tubeInspectorLineId, setTubeInspectorLineId] = useState<string>("");
+  const [tubeInspectorDirection, setTubeInspectorDirection] = useState<TubeDirection>("outbound");
+  const [tubeInspectorBranchKey, setTubeInspectorBranchKey] = useState<string>("");
+  const [tubeInspectorStationId, setTubeInspectorStationId] = useState<string | null>(null);
   const [tubeHoveredStation, setTubeHoveredStation] = useState<TubeStation | null>(null);
   const [tubeSelectedStation, setTubeSelectedStation] = useState<TubeStation | null>(null);
   const [tubeHoveredTrain, setTubeHoveredTrain] = useState<TubeLiveTrainMarker | null>(null);
@@ -383,7 +654,11 @@ function App() {
     TUBE_HISTORY_DEFAULT_SPEED,
   );
   const tubeHistoricalCacheRef = useRef<Map<string, TubeHistoricalFrame>>(new Map());
+  const tubeHistoricalPlayingRef = useRef(tubeHistoricalPlaying);
+  const tubeHistoricalBlendRef = useRef(0);
   const autoAdvancedTripIdRef = useRef<string | null>(null);
+  const latestViewStateRef = useRef<MapViewState>(LONDON_VIEW_STATE);
+  const activeCinematicKeyframesRef = useRef<CinematicTourKeyframe[] | null>(null);
 
   const osrmCount = useMemo(
     () => decodedTrips.filter((trip) => trip.routeSource === "osrm").length,
@@ -418,6 +693,30 @@ function App() {
       ),
     [currentTimeMs, visibleTrips],
   );
+  const activeTripSamplePositions = useMemo(() => {
+    if (activeTrips.length === 0) {
+      return [] as Array<[number, number]>;
+    }
+    const positions: Array<[number, number]> = [];
+    const stride = Math.max(1, Math.floor(activeTrips.length / 4));
+    for (let index = 0; index < activeTrips.length && positions.length < 4; index += stride) {
+      const trip = activeTrips[index];
+      if (!trip) {
+        continue;
+      }
+      const position = tripPositionAtTime(trip, currentTimeMs, ARROW_LEAD_SEGMENTS);
+      if (position) {
+        positions.push(position);
+      }
+    }
+    return positions;
+  }, [activeTrips, currentTimeMs]);
+  const selectedTripPosition = useMemo(() => {
+    if (!selectedTrip) {
+      return null;
+    }
+    return tripPositionAtTime(selectedTrip, currentTimeMs, FOLLOW_LOOKAHEAD_SEGMENTS);
+  }, [currentTimeMs, selectedTrip]);
 
   const focusedTrip = selectedTrip ?? hoveredTrip ?? null;
   const tripForInspector = focusedTrip;
@@ -432,6 +731,10 @@ function App() {
   const tubeLinesById = useMemo(
     () => new Map(tubeLinesWithDurations.map((line) => [line.lineId, line])),
     [tubeLinesWithDurations],
+  );
+  const tubeStationsById = useMemo(
+    () => new Map(tubeStations.map((station) => [station.id, station])),
+    [tubeStations],
   );
   const tubeLineStatusesById = useMemo(
     () => new Map(tubeStatuses.map((status) => [status.lineId, status])),
@@ -481,6 +784,242 @@ function App() {
     () => tubeArrivals.filter((arrival) => visibleTubeLineIds.has(arrival.lineId)),
     [tubeArrivals, visibleTubeLineIds],
   );
+  const tubeArrivalCountByStation = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const arrival of filteredTubeArrivals) {
+      counts.set(arrival.naptanId, (counts.get(arrival.naptanId) ?? 0) + 1);
+    }
+    return counts;
+  }, [filteredTubeArrivals]);
+  const busiestLiveStation = useMemo(() => {
+    if (liveStations.length === 0) {
+      return null;
+    }
+    return liveStations.reduce<BikePointStation | null>((best, station) => {
+      if (!best) {
+        return station;
+      }
+      const stationLoad = station.availableBikes + station.availableDocks;
+      const bestLoad = best.availableBikes + best.availableDocks;
+      return stationLoad > bestLoad ? station : best;
+    }, null);
+  }, [liveStations]);
+  const busiestTubeStation = useMemo(() => {
+    let topStationId: string | null = null;
+    let topCount = -1;
+    for (const [stationId, count] of tubeArrivalCountByStation) {
+      if (count <= topCount) {
+        continue;
+      }
+      topStationId = stationId;
+      topCount = count;
+    }
+    if (!topStationId) {
+      return null;
+    }
+    return tubeStationsById.get(topStationId) ?? null;
+  }, [tubeArrivalCountByStation, tubeStationsById]);
+  const cinematicTourDefinitions = useMemo<Record<CinematicTourId, CinematicTourDefinition>>(() => {
+    const frame = (
+      longitude: number,
+      latitude: number,
+      zoom: number,
+      pitch: number,
+      bearing: number,
+      durationMs: number,
+    ): CinematicTourKeyframe => ({
+      longitude,
+      latitude,
+      zoom,
+      pitch,
+      bearing,
+      durationMs,
+    });
+    const rideLead = selectedTripPosition
+      ?? activeTripSamplePositions[0]
+      ?? DEFAULT_TOUR_LOOKOUTS.soho;
+    const rideMid = activeTripSamplePositions[1] ?? DEFAULT_TOUR_LOOKOUTS.city;
+    const rideTail = activeTripSamplePositions[2] ?? DEFAULT_TOUR_LOOKOUTS.westminster;
+    const stationAnchor = busiestLiveStation
+      ? ([busiestLiveStation.lon, busiestLiveStation.lat] as [number, number])
+      : DEFAULT_TOUR_LOOKOUTS.soho;
+    const tubeAnchor = busiestTubeStation
+      ? ([busiestTubeStation.lon, busiestTubeStation.lat] as [number, number])
+      : DEFAULT_TOUR_LOOKOUTS.kingsCross;
+
+    return {
+      "thames-loop": {
+        id: "thames-loop",
+        label: "Thames Loop",
+        subtitle: "Landmarks, river arc, skyline",
+        keyframes: [
+          frame(-0.136, 51.508, 12.2, 58, -24, 1_200),
+          frame(DEFAULT_TOUR_LOOKOUTS.westminster[0], DEFAULT_TOUR_LOOKOUTS.westminster[1], 13.2, 62, -34, 1_700),
+          frame(DEFAULT_TOUR_LOOKOUTS.city[0], DEFAULT_TOUR_LOOKOUTS.city[1], 13.1, 57, -2, 1_850),
+          frame(DEFAULT_TOUR_LOOKOUTS.canaryWharf[0], DEFAULT_TOUR_LOOKOUTS.canaryWharf[1], 13.5, 66, 34, 2_050),
+          frame(-0.109, 51.507, 12.0, 48, 6, 1_600),
+        ],
+      },
+      "ride-rush": {
+        id: "ride-rush",
+        label: "Ride Rush",
+        subtitle: "Follow active bike flow",
+        keyframes: [
+          frame(rideLead[0], rideLead[1], 14.0, 63, -28, 1_100),
+          frame(rideMid[0], rideMid[1], 13.3, 56, -4, 1_450),
+          frame(stationAnchor[0], stationAnchor[1], 13.9, 64, 18, 1_700),
+          frame(rideTail[0], rideTail[1], 13.5, 52, -44, 1_450),
+          frame(DEFAULT_TOUR_LOOKOUTS.soho[0], DEFAULT_TOUR_LOOKOUTS.soho[1], 12.4, 42, -12, 1_550),
+        ],
+      },
+      "tube-radar": {
+        id: "tube-radar",
+        label: "Tube Radar",
+        subtitle: "Scan busy interchanges",
+        keyframes: [
+          frame(DEFAULT_TOUR_LOOKOUTS.kingsCross[0], DEFAULT_TOUR_LOOKOUTS.kingsCross[1], 13.7, 60, -12, 1_100),
+          frame(tubeAnchor[0], tubeAnchor[1], 14.2, 66, 20, 1_650),
+          frame(DEFAULT_TOUR_LOOKOUTS.city[0], DEFAULT_TOUR_LOOKOUTS.city[1], 13.1, 56, -8, 1_600),
+          frame(DEFAULT_TOUR_LOOKOUTS.westminster[0], DEFAULT_TOUR_LOOKOUTS.westminster[1], 12.6, 44, -28, 1_650),
+          frame(-0.122, 51.511, 11.8, 34, -16, 1_700),
+        ],
+      },
+    };
+  }, [
+    activeTripSamplePositions,
+    busiestLiveStation,
+    busiestTubeStation,
+    selectedTripPosition,
+  ]);
+  const cinematicTourOptions = useMemo(
+    () =>
+      (Object.values(cinematicTourDefinitions) as CinematicTourDefinition[]).map((tour) => ({
+        id: tour.id,
+        label: tour.label,
+      })),
+    [cinematicTourDefinitions],
+  );
+  const selectedCinematicTour = cinematicTourDefinitions[cinematicTourId];
+  const tubeInspectorLineOptions = useMemo(
+    () => (filteredTubeLines.length > 0 ? filteredTubeLines : tubeLinesWithDurations),
+    [filteredTubeLines, tubeLinesWithDurations],
+  );
+  const tubeSuggestedInspectorLineId = useMemo(() => {
+    if (tubeSelectedTrain && visibleTubeLineIds.has(tubeSelectedTrain.lineId)) {
+      return tubeSelectedTrain.lineId;
+    }
+    if (tubeSelectedStation) {
+      const candidate = tubeSelectedStation.lines.find((lineId) => visibleTubeLineIds.has(lineId));
+      if (candidate) {
+        return candidate;
+      }
+    }
+    if (tubeLineFilters.length === 1 && visibleTubeLineIds.has(tubeLineFilters[0])) {
+      return tubeLineFilters[0] as string;
+    }
+    return tubeInspectorLineOptions[0]?.lineId ?? "";
+  }, [
+    tubeInspectorLineOptions,
+    tubeLineFilters,
+    tubeSelectedStation,
+    tubeSelectedTrain,
+    visibleTubeLineIds,
+  ]);
+  const tubeInspectorLine = useMemo(
+    () => (tubeInspectorLineId ? tubeLinesById.get(tubeInspectorLineId) ?? null : null),
+    [tubeInspectorLineId, tubeLinesById],
+  );
+  const tubeInspectorBranches = useMemo<TubeLineBranchOption[]>(() => {
+    if (!tubeInspectorLine) {
+      return [];
+    }
+    const sourceSequences = tubeInspectorLine.branchSequences[tubeInspectorDirection];
+    const fallbackIds = tubeInspectorLine.orderedStations[tubeInspectorDirection];
+    const sequences = sourceSequences.length > 0
+      ? sourceSequences
+      : [{ stationIds: fallbackIds, path: tubeInspectorLine.stationPaths[tubeInspectorDirection] }];
+    const out: TubeLineBranchOption[] = [];
+    const seenKeys = new Set<string>();
+    for (let index = 0; index < sequences.length; index += 1) {
+      const sequence = sequences[index];
+      const stationIds = dedupeStationIds(sequence?.stationIds ?? []);
+      if (stationIds.length === 0) {
+        continue;
+      }
+      const fallbackKey = `${tubeInspectorLine.lineId}:${tubeInspectorDirection}:${index}`;
+      const key = stationIds.join(">") || fallbackKey;
+      if (seenKeys.has(key)) {
+        continue;
+      }
+      seenKeys.add(key);
+      out.push({
+        key,
+        stationIds,
+        label: routeTerminusLabel(stationIds, tubeStationsById),
+      });
+    }
+    return out;
+  }, [tubeInspectorDirection, tubeInspectorLine, tubeStationsById]);
+  const tubeInspectorBranch = useMemo(
+    () =>
+      tubeInspectorBranches.find((branch) => branch.key === tubeInspectorBranchKey)
+      ?? tubeInspectorBranches[0]
+      ?? null,
+    [tubeInspectorBranchKey, tubeInspectorBranches],
+  );
+  const tubeInspectorStations = useMemo(() => {
+    if (!tubeInspectorBranch) {
+      return [];
+    }
+    return tubeInspectorBranch.stationIds.map((stationId, index) => {
+      const station = tubeStationsById.get(stationId);
+      return {
+        stationId,
+        index: index + 1,
+        name: station?.name ?? stationId,
+        zone: station?.zone ?? null,
+        hasInterchange: station?.isInterchange ?? false,
+        departures: tubeArrivalCountByStation.get(stationId) ?? 0,
+      };
+    });
+  }, [tubeArrivalCountByStation, tubeInspectorBranch, tubeStationsById]);
+  const tubeInspectorStation = useMemo(
+    () => (tubeInspectorStationId ? tubeStationsById.get(tubeInspectorStationId) ?? null : null),
+    [tubeInspectorStationId, tubeStationsById],
+  );
+  const tubeInspectorDepartures = useMemo<TubeDepartureBoardEntry[]>(() => {
+    if (!tubeInspectorStationId) {
+      return [];
+    }
+    const nearestByTrain = new Map<string, TubeArrival>();
+    for (const arrival of filteredTubeArrivals) {
+      if (arrival.naptanId !== tubeInspectorStationId) {
+        continue;
+      }
+      const vehicle = arrival.vehicleId.trim();
+      const key = `${arrival.lineId}:${vehicle.length > 0 ? vehicle : arrival.timestamp}`;
+      const existing = nearestByTrain.get(key);
+      if (!existing || arrival.timeToStation < existing.timeToStation) {
+        nearestByTrain.set(key, arrival);
+      }
+    }
+    return Array.from(nearestByTrain.values())
+      .sort((a, b) => a.timeToStation - b.timeToStation)
+      .slice(0, 14)
+      .map((arrival, index) => {
+        const line = tubeLinesById.get(arrival.lineId);
+        return {
+          id: `${arrival.lineId}:${arrival.vehicleId}:${arrival.expectedArrival}:${index}`,
+          lineId: arrival.lineId,
+          lineName: line?.lineName ?? arrival.lineId,
+          lineColor: line?.color ?? [165, 191, 230],
+          destination: arrival.towards ?? "Destination unavailable",
+          etaSeconds: Math.max(0, Math.round(arrival.timeToStation)),
+          etaLabel: etaLabel(arrival.timeToStation),
+          expectedTimeLabel: expectedTimeLabel(arrival.expectedArrival),
+        };
+      });
+  }, [filteredTubeArrivals, tubeInspectorStationId, tubeLinesById]);
   const tubeActionMarkers = useMemo(
     () =>
       buildTubeLiveTrainMarkersFromActions(
@@ -492,8 +1031,14 @@ function App() {
     [filteredTubeLines, filteredTubeStations, tubeLiveActions, tubeLiveClockMs],
   );
   const tubeArrivalMarkers = useMemo(
-    () => buildTubeLiveTrainMarkers(filteredTubeArrivals, filteredTubeLines, filteredTubeStations),
-    [filteredTubeArrivals, filteredTubeLines, filteredTubeStations],
+    () =>
+      buildTubeLiveTrainMarkers(
+        filteredTubeArrivals,
+        filteredTubeLines,
+        filteredTubeStations,
+        tubeLiveClockMs,
+      ),
+    [filteredTubeArrivals, filteredTubeLines, filteredTubeStations, tubeLiveClockMs],
   );
   const tubeLiveTrainMarkers = useMemo(
     () => (tubeActionMarkers.length > 0 ? tubeActionMarkers : tubeArrivalMarkers),
@@ -596,6 +1141,16 @@ function App() {
     second: "2-digit",
   });
   const mapStyleUrl = theme === "dark" ? DARK_MAP_STYLE_URL : LIGHT_MAP_STYLE_URL;
+  const updateMapThreeDLayer = useCallback(
+    (enabled: boolean) => {
+      const map = mapRef.current?.getMap();
+      if (!map) {
+        return;
+      }
+      syncThreeDBuildingsLayer(map, enabled);
+    },
+    [],
+  );
 
   const clearTripFocus = useCallback(() => {
     setSelectedTrip(null);
@@ -604,11 +1159,120 @@ function App() {
     autoAdvancedTripIdRef.current = null;
   }, []);
 
+  const toggleCinematicTourPlayback = useCallback(() => {
+    setCinematicTourPlaying((playing) => {
+      const next = !playing;
+      if (!next) {
+        activeCinematicKeyframesRef.current = null;
+        return next;
+      }
+      const frozenKeyframes = (selectedCinematicTour?.keyframes ?? []).map((keyframe) => ({
+        ...keyframe,
+      }));
+      if (frozenKeyframes.length === 0) {
+        activeCinematicKeyframesRef.current = null;
+        return false;
+      }
+      activeCinematicKeyframesRef.current = frozenKeyframes;
+      if (!isPlaying) {
+        togglePlay();
+      }
+      return next;
+    });
+  }, [isPlaying, selectedCinematicTour, togglePlay]);
+
+  useEffect(() => {
+    latestViewStateRef.current = viewState;
+  }, [viewState]);
+
   useEffect(() => {
     if (typeof window !== "undefined") {
       window.localStorage.setItem(THEME_STORAGE_KEY, theme);
     }
   }, [theme]);
+
+  useEffect(() => {
+    if (mode === "playback") {
+      return;
+    }
+    if (!cinematicTourPlaying) {
+      return;
+    }
+    activeCinematicKeyframesRef.current = null;
+    setCinematicTourPlaying(false);
+  }, [cinematicTourPlaying, mode]);
+
+  useEffect(() => {
+    if (!cinematicTourPlaying || mode !== "playback") {
+      return;
+    }
+    const keyframes = activeCinematicKeyframesRef.current ?? [];
+    if (keyframes.length === 0) {
+      activeCinematicKeyframesRef.current = null;
+      setCinematicTourPlaying(false);
+      return;
+    }
+
+    let segmentIndex = 0;
+    let segmentStartTs = performance.now();
+    let frameId = 0;
+    const startPose: CameraPose = {
+      longitude: latestViewStateRef.current.longitude,
+      latitude: latestViewStateRef.current.latitude,
+      zoom: latestViewStateRef.current.zoom,
+      pitch: latestViewStateRef.current.pitch ?? 0,
+      bearing: latestViewStateRef.current.bearing ?? 0,
+    };
+
+    const step = (timestamp: number): void => {
+      const target = keyframes[segmentIndex];
+      if (!target) {
+        activeCinematicKeyframesRef.current = null;
+        setCinematicTourPlaying(false);
+        return;
+      }
+      const previousTarget = keyframes[segmentIndex - 1];
+      const from = previousTarget ?? startPose;
+      const durationMs = Math.max(CINEMATIC_MIN_SEGMENT_MS, target.durationMs);
+      const t = clamp01((timestamp - segmentStartTs) / durationMs);
+      const eased = easeInOutCubic(t);
+
+      setViewState((current) => ({
+        ...current,
+        longitude: from.longitude + (target.longitude - from.longitude) * eased,
+        latitude: from.latitude + (target.latitude - from.latitude) * eased,
+        zoom: from.zoom + (target.zoom - from.zoom) * eased,
+        pitch: from.pitch + (target.pitch - from.pitch) * eased,
+        bearing: interpolateBearing(from.bearing, target.bearing, eased),
+      }));
+
+      if (t >= 0.999) {
+        segmentIndex += 1;
+        segmentStartTs = timestamp;
+      }
+      if (segmentIndex >= keyframes.length) {
+        activeCinematicKeyframesRef.current = null;
+        setCinematicTourPlaying(false);
+        return;
+      }
+      frameId = window.requestAnimationFrame(step);
+    };
+
+    frameId = window.requestAnimationFrame(step);
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [cinematicTourPlaying, mode]);
+
+  useEffect(() => {
+    setViewState((current) => ({
+      ...current,
+      pitch: is3DMode ? THREE_D_TARGET_PITCH : 0,
+      bearing: is3DMode ? THREE_D_TARGET_BEARING : 0,
+      zoom: is3DMode ? Math.max(current.zoom, THREE_D_MIN_ZOOM_TARGET) : current.zoom,
+    }));
+    updateMapThreeDLayer(is3DMode);
+  }, [is3DMode, updateMapThreeDLayer]);
 
   useEffect(() => {
     clearTripFocus();
@@ -622,6 +1286,75 @@ function App() {
       setTubeHistoricalPlaying(false);
     }
   }, [clearTripFocus, mode]);
+
+  useEffect(() => {
+    if (tubeInspectorLineOptions.length === 0) {
+      if (tubeInspectorLineId !== "") {
+        setTubeInspectorLineId("");
+      }
+      return;
+    }
+    const availableLineIds = new Set(tubeInspectorLineOptions.map((line) => line.lineId));
+    if (tubeInspectorLineId && availableLineIds.has(tubeInspectorLineId)) {
+      return;
+    }
+    if (tubeSuggestedInspectorLineId && availableLineIds.has(tubeSuggestedInspectorLineId)) {
+      setTubeInspectorLineId(tubeSuggestedInspectorLineId);
+      return;
+    }
+    setTubeInspectorLineId(tubeInspectorLineOptions[0]?.lineId ?? "");
+  }, [tubeInspectorLineId, tubeInspectorLineOptions, tubeSuggestedInspectorLineId]);
+
+  useEffect(() => {
+    if (!tubeSelectedStation || !tubeInspectorLineId) {
+      return;
+    }
+    if (tubeSelectedStation.lines.includes(tubeInspectorLineId)) {
+      return;
+    }
+    const nextLine = tubeSelectedStation.lines.find((lineId) =>
+      tubeInspectorLineOptions.some((line) => line.lineId === lineId),
+    );
+    if (nextLine) {
+      setTubeInspectorLineId(nextLine);
+    }
+  }, [tubeInspectorLineId, tubeInspectorLineOptions, tubeSelectedStation]);
+
+  useEffect(() => {
+    if (tubeInspectorBranches.length === 0) {
+      if (tubeInspectorBranchKey !== "") {
+        setTubeInspectorBranchKey("");
+      }
+      return;
+    }
+    if (tubeInspectorBranches.some((branch) => branch.key === tubeInspectorBranchKey)) {
+      return;
+    }
+    const preferredBranch = tubeSelectedStation
+      ? tubeInspectorBranches.find((branch) => branch.stationIds.includes(tubeSelectedStation.id))
+      : null;
+    setTubeInspectorBranchKey((preferredBranch ?? tubeInspectorBranches[0]).key);
+  }, [tubeInspectorBranchKey, tubeInspectorBranches, tubeSelectedStation]);
+
+  useEffect(() => {
+    const stationIds = tubeInspectorBranch?.stationIds ?? [];
+    if (stationIds.length === 0) {
+      if (tubeInspectorStationId !== null) {
+        setTubeInspectorStationId(null);
+      }
+      return;
+    }
+    if (tubeSelectedStation && stationIds.includes(tubeSelectedStation.id)) {
+      if (tubeInspectorStationId !== tubeSelectedStation.id) {
+        setTubeInspectorStationId(tubeSelectedStation.id);
+      }
+      return;
+    }
+    if (tubeInspectorStationId && stationIds.includes(tubeInspectorStationId)) {
+      return;
+    }
+    setTubeInspectorStationId(stationIds[0] ?? null);
+  }, [tubeInspectorBranch, tubeInspectorStationId, tubeSelectedStation]);
 
   const jumpToRandomTime = useCallback(() => {
     if (!bounds) {
@@ -663,6 +1396,7 @@ function App() {
         return false;
       }
 
+      setCinematicTourPlaying(false);
       setSelectedTrip(trip);
       setHoveredTrip(null);
       setAutoRandomFollowEnabled(true);
@@ -837,11 +1571,27 @@ function App() {
       return;
     }
     setTubeLiveClockMs(Date.now());
-    const timer = window.setInterval(() => {
-      setTubeLiveClockMs(Date.now());
-    }, 1_000);
-    return () => window.clearInterval(timer);
+    let animationFrameId = 0;
+    let lastCommitTimestamp = 0;
+
+    const tick = (timestamp: number): void => {
+      if (
+        lastCommitTimestamp === 0
+        || timestamp - lastCommitTimestamp >= TUBE_LIVE_CLOCK_FRAME_MS
+      ) {
+        lastCommitTimestamp = timestamp;
+        setTubeLiveClockMs(Date.now());
+      }
+      animationFrameId = window.requestAnimationFrame(tick);
+    };
+
+    animationFrameId = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(animationFrameId);
   }, [mode, tubeMode]);
+
+  useEffect(() => {
+    tubeHistoricalPlayingRef.current = tubeHistoricalPlaying;
+  }, [tubeHistoricalPlaying]);
 
   useEffect(() => {
     if (mode !== "tube" || tubeMode !== "historical" || tubeTopologyStatus !== "ready") {
@@ -928,14 +1678,74 @@ function App() {
   }, [mode, tubeMode, tubeHistoricalDate, tubeLines, tubeTopologyStatus]);
 
   useEffect(() => {
-    if (
-      mode !== "tube" ||
-      tubeMode !== "historical" ||
-      !tubeHistoricalPlaying ||
-      !tubeHistoricalFrame
-    ) {
+    const isInteractiveTarget = (target: EventTarget | null): boolean => {
+      if (!(target instanceof HTMLElement)) {
+        return false;
+      }
+      if (target.isContentEditable) {
+        return true;
+      }
+      return Boolean(target.closest("input, textarea, select, button, [role='button']"));
+    };
+
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (mode !== "playback") {
+        return;
+      }
+      if (isInteractiveTarget(event.target)) {
+        return;
+      }
+      if (event.code !== "KeyC" || event.repeat) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      toggleCinematicTourPlayback();
+    };
+
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [mode, toggleCinematicTourPlayback]);
+
+  useEffect(() => {
+    const isInteractiveTarget = (target: EventTarget | null): boolean => {
+      if (!(target instanceof HTMLElement)) {
+        return false;
+      }
+      if (target.isContentEditable) {
+        return true;
+      }
+      return Boolean(target.closest("input, textarea, select, button, [role='button']"));
+    };
+
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (mode !== "tube" || tubeMode !== "historical" || !tubeHistoricalFrame) {
+        return;
+      }
+      if (isInteractiveTarget(event.target)) {
+        return;
+      }
+      if (event.code !== "Space" || event.repeat) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      setTubeHistoricalPlaying((playing) => !playing);
+    };
+
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [mode, tubeHistoricalFrame, tubeMode]);
+
+  useEffect(() => {
+    if (mode !== "tube" || tubeMode !== "historical" || !tubeHistoricalFrame) {
+      tubeHistoricalBlendRef.current = 0;
       return;
     }
+    if (!tubeHistoricalPlaying && tubeHistoricalBlendRef.current <= 0.0001) {
+      return;
+    }
+
     let animationFrameId = 0;
     let previousTimestamp = performance.now();
 
@@ -943,30 +1753,64 @@ function App() {
       const deltaMs = Math.max(0, timestamp - previousTimestamp);
       previousTimestamp = timestamp;
 
-      setTubeHistoricalCurrentMs((previous) => {
-        const next = previous + deltaMs * tubeHistoricalSpeed;
-        if (next >= tubeHistoricalFrame.maxMs) {
-          setTubeHistoricalPlaying(false);
-          return tubeHistoricalFrame.maxMs;
-        }
-        return next;
-      });
-      animationFrameId = window.requestAnimationFrame(step);
+      const targetBlend = tubeHistoricalPlayingRef.current ? 1 : 0;
+      const currentBlend = tubeHistoricalBlendRef.current;
+      const easeDurationMs =
+        targetBlend > currentBlend ? TUBE_HISTORY_EASE_IN_MS : TUBE_HISTORY_EASE_OUT_MS;
+      const blendDelta = easeDurationMs <= 0 ? 1 : deltaMs / easeDurationMs;
+      const nextBlend =
+        targetBlend > currentBlend
+          ? Math.min(targetBlend, currentBlend + blendDelta)
+          : Math.max(targetBlend, currentBlend - blendDelta);
+      tubeHistoricalBlendRef.current = nextBlend;
+
+      if (nextBlend > 0) {
+        setTubeHistoricalCurrentMs((previous) => {
+          const next = previous + deltaMs * tubeHistoricalSpeed * nextBlend;
+          if (next >= tubeHistoricalFrame.maxMs) {
+            tubeHistoricalBlendRef.current = 0;
+            setTubeHistoricalPlaying(false);
+            return tubeHistoricalFrame.maxMs;
+          }
+          return next;
+        });
+      }
+
+      if (tubeHistoricalPlayingRef.current || tubeHistoricalBlendRef.current > 0.0001) {
+        animationFrameId = window.requestAnimationFrame(step);
+      }
     };
 
     animationFrameId = window.requestAnimationFrame(step);
     return () => window.cancelAnimationFrame(animationFrameId);
   }, [mode, tubeHistoricalFrame, tubeHistoricalPlaying, tubeHistoricalSpeed, tubeMode]);
 
+  useEffect(() => {
+    if (mode === "tube" && tubeMode === "historical") {
+      return;
+    }
+    tubeHistoricalBlendRef.current = 0;
+  }, [mode, tubeMode]);
+
   const followedTripPosition = useMemo(() => {
-    if (mode !== "playback" || !autoRandomFollowEnabled || !selectedTrip) {
+    if (
+      mode !== "playback"
+      || cinematicTourPlaying
+      || !autoRandomFollowEnabled
+      || !selectedTrip
+    ) {
       return null;
     }
     return tripPositionAtTime(selectedTrip, currentTimeMs, FOLLOW_LOOKAHEAD_SEGMENTS);
-  }, [autoRandomFollowEnabled, currentTimeMs, mode, selectedTrip]);
+  }, [autoRandomFollowEnabled, cinematicTourPlaying, currentTimeMs, mode, selectedTrip]);
 
   useEffect(() => {
-    if (mode !== "playback" || !autoRandomFollowEnabled || !followedTripPosition) {
+    if (
+      mode !== "playback"
+      || cinematicTourPlaying
+      || !autoRandomFollowEnabled
+      || !followedTripPosition
+    ) {
       return;
     }
     const [targetLon, targetLat] = followedTripPosition;
@@ -985,7 +1829,7 @@ function App() {
         latitude: nextLat,
       };
     });
-  }, [autoRandomFollowEnabled, followedTripPosition, mode]);
+  }, [autoRandomFollowEnabled, cinematicTourPlaying, followedTripPosition, mode]);
 
   useEffect(() => {
     if (mode !== "playback" || !autoRandomFollowEnabled || !selectedTrip) {
@@ -1118,6 +1962,10 @@ function App() {
         fadeTrail: true,
         capRounded: true,
         jointRounded: true,
+        parameters: {
+          [GL.DEPTH_TEST]: false,
+        } as any,
+        getPolygonOffset: () => [0, -120],
         pickable: true,
         onHover: ({ object }: PickingInfo<DecodedTrip>) => {
           setHoveredTrip(object ?? null);
@@ -1202,6 +2050,9 @@ function App() {
           widthMinPixels: 2,
           capRounded: true,
           jointRounded: true,
+          parameters: {
+            [GL.DEPTH_TEST]: false,
+          } as any,
           opacity: 0.9,
           pickable: false,
         }),
@@ -1275,13 +2126,7 @@ function App() {
         color: [...line.color, 116] as [number, number, number, number],
       })),
     );
-    const stationArrivalCounts = new Map<string, number>();
-    for (const arrival of filteredTubeArrivals) {
-      stationArrivalCounts.set(
-        arrival.naptanId,
-        (stationArrivalCounts.get(arrival.naptanId) ?? 0) + 1,
-      );
-    }
+    const stationArrivalCounts = tubeArrivalCountByStation;
 
     const output: Layer[] = [
       new PathLayer<{
@@ -1332,17 +2177,42 @@ function App() {
 
     if (tubeMode === "live") {
       output.push(
-        new ScatterplotLayer<TubeLiveTrainMarker>({
-          id: "tube-live-train-glow",
+        new IconLayer<TubeLiveTrainMarker>({
+          id: "tube-live-train-shadow",
           data: tubeLiveTrainMarkers,
           pickable: false,
-          stroked: false,
-          filled: true,
-          radiusUnits: "meters",
-          radiusMinPixels: 12,
+          iconAtlas: TRAIN_BODY_ICON_ATLAS,
+          iconMapping: TRAIN_BODY_ICON_MAPPING,
+          getIcon: () => "train",
           getPosition: (marker) => marker.position,
-          getRadius: () => 56,
-          getFillColor: () => TUBE_TRAIN_GLOW_COLOR,
+          getColor: () => TUBE_LIVE_TRAIN_SHADOW_COLOR,
+          getAngle: (marker) => marker.headingDeg,
+          getSize: () => 18.5,
+          sizeScale: 1,
+          sizeUnits: "pixels",
+          sizeMinPixels: 15,
+          sizeMaxPixels: 25,
+          billboard: true,
+          opacity: 0.72,
+        }),
+      );
+      output.push(
+        new IconLayer<TubeLiveTrainMarker>({
+          id: "tube-live-train-outline",
+          data: tubeLiveTrainMarkers,
+          pickable: false,
+          iconAtlas: TRAIN_BODY_ICON_ATLAS,
+          iconMapping: TRAIN_BODY_ICON_MAPPING,
+          getIcon: () => "train",
+          getPosition: (marker) => marker.position,
+          getColor: () => TUBE_LIVE_TRAIN_OUTLINE_COLOR,
+          getAngle: (marker) => marker.headingDeg,
+          getSize: () => 15.6,
+          sizeScale: 1,
+          sizeUnits: "pixels",
+          sizeMinPixels: 12.4,
+          sizeMaxPixels: 21,
+          billboard: true,
           opacity: 0.9,
         }),
       );
@@ -1351,17 +2221,17 @@ function App() {
           id: "tube-live-trains",
           data: tubeLiveTrainMarkers,
           pickable: true,
-          iconAtlas: ARROW_ICON_ATLAS,
-          iconMapping: ARROW_ICON_MAPPING,
-          getIcon: () => "arrow",
+          iconAtlas: TRAIN_BODY_ICON_ATLAS,
+          iconMapping: TRAIN_BODY_ICON_MAPPING,
+          getIcon: () => "train",
           getPosition: (marker) => marker.position,
-          getColor: () => TUBE_TRAIN_COLOR,
+          getColor: (marker) => tubeLiveTrainBodyColor(marker, tubeLinesById),
           getAngle: (marker) => marker.headingDeg,
-          getSize: () => 14,
+          getSize: () => 14.2,
           sizeScale: 1,
           sizeUnits: "pixels",
-          sizeMinPixels: 11,
-          sizeMaxPixels: 22,
+          sizeMinPixels: 11.4,
+          sizeMaxPixels: 19,
           billboard: true,
           onHover: ({ object }: PickingInfo<TubeLiveTrainMarker>) => {
             setTubeHoveredTrain(object ?? null);
@@ -1369,6 +2239,26 @@ function App() {
           onClick: ({ object }: PickingInfo<TubeLiveTrainMarker>) => {
             setTubeSelectedTrain(object ?? null);
           },
+        }),
+      );
+      output.push(
+        new IconLayer<TubeLiveTrainMarker>({
+          id: "tube-live-train-nose",
+          data: tubeLiveTrainMarkers,
+          pickable: false,
+          iconAtlas: TRAIN_NOSE_ICON_ATLAS,
+          iconMapping: TRAIN_NOSE_ICON_MAPPING,
+          getIcon: () => "nose",
+          getPosition: (marker) => marker.position,
+          getColor: (marker) => tubeLiveTrainNoseColor(marker),
+          getAngle: (marker) => marker.headingDeg,
+          getSize: () => 6.2,
+          sizeScale: 1,
+          sizeUnits: "pixels",
+          sizeMinPixels: 5,
+          sizeMaxPixels: 8.6,
+          billboard: true,
+          opacity: 0.98,
         }),
       );
     } else {
@@ -1392,6 +2282,7 @@ function App() {
           fadeTrail: true,
           capRounded: true,
           jointRounded: true,
+          getPolygonOffset: () => [0, -120],
           pickable: false,
         }),
       );
@@ -1439,13 +2330,14 @@ function App() {
 
     return output;
   }, [
-    filteredTubeArrivals,
+    tubeArrivalCountByStation,
     filteredTubeLines,
     filteredTubeStations,
     tubeHistoricalActiveMarkers,
     tubeHistoricalCurrentMs,
     tubeHistoricalRunsWithColor,
     tubeLiveTrainMarkers,
+    tubeLinesById,
     tubeMode,
     tubeStationSeverityById,
   ]);
@@ -1571,7 +2463,16 @@ function App() {
     <main className={`appRoot ${theme === "light" ? "appRoot--light" : ""}`}>
       <DeckGL
         viewState={viewState}
-        onViewStateChange={({ viewState: nextViewState }) => {
+        onViewStateChange={({ viewState: nextViewState, interactionState }) => {
+          const isUserInteracting = Boolean(
+            interactionState?.isDragging
+            || interactionState?.isPanning
+            || interactionState?.isRotating
+            || interactionState?.isZooming,
+          );
+          if (cinematicTourPlaying && isUserInteracting) {
+            setCinematicTourPlaying(false);
+          }
           setViewState(nextViewState as MapViewState);
         }}
         getCursor={({ isHovering }) => (isHovering ? "pointer" : "default")}
@@ -1603,7 +2504,17 @@ function App() {
           left: "0",
         }}
       >
-        <MapView reuseMaps mapStyle={mapStyleUrl} />
+        <MapView
+          ref={mapRef}
+          reuseMaps
+          mapStyle={mapStyleUrl}
+          onLoad={() => {
+            updateMapThreeDLayer(is3DMode);
+          }}
+          onStyleData={() => {
+            updateMapThreeDLayer(is3DMode);
+          }}
+        />
       </DeckGL>
 
       <section className="hudMode" role="group" aria-label="Mode">
@@ -1627,6 +2538,13 @@ function App() {
           onClick={() => setMode("tube")}
         >
           Tube
+        </button>
+        <button
+          type="button"
+          className={`hudMode__button ${is3DMode ? "isActive" : ""}`}
+          onClick={() => setIs3DMode((current) => !current)}
+        >
+          3D
         </button>
         <button
           type="button"
@@ -1793,6 +2711,10 @@ function App() {
           isPlaying={isPlaying}
           isRandomRideFollowEnabled={autoRandomFollowEnabled}
           speed={speed}
+          cinematicTourId={cinematicTourId}
+          cinematicTourOptions={cinematicTourOptions}
+          cinematicTourSubtitle={selectedCinematicTour?.subtitle ?? ""}
+          isCinematicTourPlaying={cinematicTourPlaying}
           onSetTime={setPlaybackTime}
           onTogglePlay={togglePlay}
           onRandomRideFollow={() => {
@@ -1804,6 +2726,12 @@ function App() {
           }}
           onRandomTimeJump={jumpToRandomTime}
           onSetSpeed={(nextSpeed) => setSpeed(nextSpeed)}
+          onSetCinematicTour={(nextTourId) => {
+            activeCinematicKeyframesRef.current = null;
+            setCinematicTourPlaying(false);
+            setCinematicTourId(nextTourId as CinematicTourId);
+          }}
+          onToggleCinematicTour={toggleCinematicTourPlayback}
           onNaturalLanguageJump={jumpToNaturalLanguage}
           jumpError={jumpError}
         />
@@ -1979,6 +2907,137 @@ function App() {
               </button>
             ))}
           </div>
+
+          <section className="lineInspector" aria-label="Tube line inspector">
+            <header className="lineInspector__header">
+              <p className="lineInspector__kicker">Line Inspector</p>
+              <p className="lineInspector__title">
+                {tubeInspectorLine?.lineName ?? "No line selected"}
+              </p>
+            </header>
+
+            {tubeInspectorLine ? (
+              <>
+                <div className="lineInspector__controls">
+                  <label className="lineInspector__field">
+                    <span>Line</span>
+                    <select
+                      className="commandRail__select lineInspector__select"
+                      value={tubeInspectorLineId}
+                      onChange={(event) => setTubeInspectorLineId(event.target.value)}
+                    >
+                      {tubeInspectorLineOptions.map((line) => (
+                        <option key={line.lineId} value={line.lineId}>
+                          {line.lineName}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="lineInspector__direction" role="group" aria-label="Direction">
+                    <button
+                      type="button"
+                      className={`lineInspector__dirButton ${tubeInspectorDirection === "outbound" ? "isActive" : ""}`}
+                      onClick={() => setTubeInspectorDirection("outbound")}
+                    >
+                      Outbound
+                    </button>
+                    <button
+                      type="button"
+                      className={`lineInspector__dirButton ${tubeInspectorDirection === "inbound" ? "isActive" : ""}`}
+                      onClick={() => setTubeInspectorDirection("inbound")}
+                    >
+                      Inbound
+                    </button>
+                  </div>
+                </div>
+
+                {tubeInspectorBranches.length > 1 ? (
+                  <label className="lineInspector__field">
+                    <span>Branch</span>
+                    <select
+                      className="commandRail__select lineInspector__select"
+                      value={tubeInspectorBranch?.key ?? ""}
+                      onChange={(event) => setTubeInspectorBranchKey(event.target.value)}
+                    >
+                      {tubeInspectorBranches.map((branch) => (
+                        <option key={branch.key} value={branch.key}>
+                          {branch.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+
+                <div
+                  className="lineInspector__stationList"
+                  role="list"
+                  aria-label={`${tubeInspectorLine.lineName} stations in order`}
+                >
+                  {tubeInspectorStations.map((entry) => (
+                    <button
+                      key={entry.stationId}
+                      type="button"
+                      className={`lineInspector__station ${tubeInspectorStationId === entry.stationId ? "isActive" : ""}`}
+                      onClick={() => {
+                        setTubeInspectorStationId(entry.stationId);
+                        const station = tubeStationsById.get(entry.stationId);
+                        if (station) {
+                          setTubeSelectedStation(station);
+                          setTubeHoveredStation(null);
+                        }
+                      }}
+                    >
+                      <span className="lineInspector__stationIndex">{entry.index}</span>
+                      <span className="lineInspector__stationBody">
+                        <span className="lineInspector__stationName">{entry.name}</span>
+                        <span className="lineInspector__stationMeta">
+                          Zone {entry.zone ?? "?"}
+                          {entry.hasInterchange ? " | interchange" : ""}
+                        </span>
+                      </span>
+                      <span className="lineInspector__stationCount" aria-hidden="true">
+                        {entry.departures > 0 ? entry.departures : "-"}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="lineInspector__board" aria-live="polite">
+                  <p className="lineInspector__boardTitle">
+                    Departures board
+                    {tubeInspectorStation ? ` - ${tubeInspectorStation.name}` : ""}
+                  </p>
+                  {tubeMode !== "live" ? (
+                    <p className="lineInspector__empty">
+                      Switch to Live mode for real-time departure boards.
+                    </p>
+                  ) : tubeInspectorDepartures.length === 0 ? (
+                    <p className="lineInspector__empty">No live departures available right now.</p>
+                  ) : (
+                    <ul className="lineInspector__boardList">
+                      {tubeInspectorDepartures.map((departure) => (
+                        <li key={departure.id} className="lineInspector__boardItem">
+                          <span
+                            className="lineInspector__linePill"
+                            style={{
+                              backgroundColor: `rgb(${departure.lineColor[0]}, ${departure.lineColor[1]}, ${departure.lineColor[2]})`,
+                            }}
+                          >
+                            {departure.lineName}
+                          </span>
+                          <span className="lineInspector__destination">{departure.destination}</span>
+                          <span className="lineInspector__eta">{departure.etaLabel}</span>
+                          <span className="lineInspector__clock">{departure.expectedTimeLabel}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </>
+            ) : (
+              <p className="lineInspector__empty">No Tube lines are currently available.</p>
+            )}
+          </section>
         </section>
       ) : null}
     </main>

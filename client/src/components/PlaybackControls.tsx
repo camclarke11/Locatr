@@ -10,11 +10,17 @@ type PlaybackControlsProps = {
   isPlaying: boolean;
   isRandomRideFollowEnabled: boolean;
   speed: PlaybackSpeed;
+  cinematicTourId: string;
+  cinematicTourOptions: Array<{ id: string; label: string }>;
+  cinematicTourSubtitle: string;
+  isCinematicTourPlaying: boolean;
   onSetTime: (value: number) => void;
   onTogglePlay: () => void;
   onRandomRideFollow: () => void;
   onRandomTimeJump: () => void;
   onSetSpeed: (speed: PlaybackSpeed) => void;
+  onSetCinematicTour: (tourId: string) => void;
+  onToggleCinematicTour: () => void;
   onNaturalLanguageJump: (query: string) => void;
   jumpError: string | null;
 };
@@ -28,11 +34,17 @@ export function PlaybackControls({
   isPlaying,
   isRandomRideFollowEnabled,
   speed,
+  cinematicTourId,
+  cinematicTourOptions,
+  cinematicTourSubtitle,
+  isCinematicTourPlaying,
   onSetTime,
   onTogglePlay,
   onRandomRideFollow,
   onRandomTimeJump,
   onSetSpeed,
+  onSetCinematicTour,
+  onToggleCinematicTour,
   onNaturalLanguageJump,
   jumpError,
 }: PlaybackControlsProps) {
@@ -109,6 +121,38 @@ export function PlaybackControls({
           ))}
         </select>
       </label>
+
+      <label className="commandRail__row commandRail__row--speed">
+        <span className="commandRail__icon" aria-hidden="true">
+          C
+        </span>
+        <span>Cinematic</span>
+        <select
+          className="commandRail__select"
+          value={cinematicTourId}
+          onChange={(event) => onSetCinematicTour(event.target.value)}
+        >
+          {cinematicTourOptions.map((tour) => (
+            <option key={tour.id} value={tour.id}>
+              {tour.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <button
+        type="button"
+        onClick={onToggleCinematicTour}
+        className={`commandRail__row ${isCinematicTourPlaying ? "isActive" : ""}`}
+      >
+        <span className="commandRail__icon" aria-hidden="true">
+          {isCinematicTourPlaying ? "||" : ">"}
+        </span>
+        <span>{isCinematicTourPlaying ? "Stop Tour" : "Play Tour"}</span>
+        <kbd className="commandRail__key">C</kbd>
+      </button>
+
+      <p className="commandRail__hint">{cinematicTourSubtitle}</p>
 
       <button
         type="button"
